@@ -1,0 +1,9 @@
+sounddevice>=0.4.6
+numpy>=1.26.0
+soundfile>=0.12.1
+customtkinter>=5.2.1
+pillow>=10.1.0
+scipy>=1.11.4
+keyboard>=0.13.5
+yt-dlp>=2023.11.16
+pydub>=0.25.1

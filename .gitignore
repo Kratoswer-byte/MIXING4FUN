@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Logs
+*.log
+soundboard.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Config locale (può contenere path specifici)
+soundboard_config.json
+
+# Build outputs
+build/
+dist/
+*.exe
+
+# FFmpeg (troppo grande per Git)
+ffmpeg-*/
+ffmpeg.exe
+ffprobe.exe
+
+# Clips audio (troppo grandi, gestire separatamente)
+clips/*.mp3
+clips/*.wav
+clips/*.ogg
+clips/*.flac
+!clips/.gitkeep
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~.nib
