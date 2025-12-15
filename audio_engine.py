@@ -121,12 +121,13 @@ class AudioEffects:
 class AudioMixer:
     """Mixer audio principale"""
     
-    def __init__(self, sample_rate: int = 44100, buffer_size: int = 1024, output_device=None, secondary_output_device=None):
+    def __init__(self, sample_rate: int = 44100, buffer_size: int = 1024, output_device=None, secondary_output_device=None, virtual_output_callback=None):
         self.sample_rate = sample_rate
         self.buffer_size = buffer_size
         self.output_device = output_device  # None = default, altrimenti ID dispositivo
         self.secondary_output_device = secondary_output_device  # Secondo output (es. cuffie)
         self.secondary_sample_rate = None  # Sample rate del dispositivo secondario
+        self.virtual_output_callback = virtual_output_callback  # Callback per inviare audio al ProMixer
         self.clips: Dict[str, AudioClip] = {}
         self.mic_volume = 0.8
         self.master_volume = 1.0
@@ -192,17 +193,13 @@ class AudioMixer:
         
         outdata[:] = mix
     
-    def audio_callback_output_only(self, outdata, frames, time, status):
-        """Callback per output primario"""
-        if status:
-            print(f"Audio status primario: {status}")
-        
-        # Mix delle clip
+    def _generate_mix(self, frames: int, is_secondary: bool = False) -> np.ndarray:
+        """Genera il mix audio (usato sia per device che per virtual output)"""
         mix = np.zeros((frames, 2), dtype=np.float32)
         
         for clip in self.clips.values():
             if clip.is_playing:
-                clip_samples = clip.get_samples(frames)
+                clip_samples = clip.get_samples(frames, is_secondary=is_secondary)
                 mix += clip_samples
         
         # Applica effetti
@@ -213,14 +210,31 @@ class AudioMixer:
             mix = AudioEffects.eq_bass(mix, self.bass_boost, self.sample_rate)
         
         # Applica master volume
-        mix *= self.master_volume
+        if is_secondary:
+            mix *= self.master_volume * self.secondary_volume
+        else:
+            mix *= self.master_volume
         
         # Limiter per evitare clipping
         mix = np.clip(mix, -1.0, 1.0)
         
-        # Registrazione
-        if self.is_recording:
+        # Registrazione (solo dal primario)
+        if not is_secondary and self.is_recording:
             self.recorded_frames.append(mix.copy())
+        
+        return mix
+    
+    def audio_callback_output_only(self, outdata, frames, time, status):
+        """Callback per output primario"""
+        if status:
+            print(f"Audio status primario: {status}")
+        
+        # Genera mix
+        mix = self._generate_mix(frames, is_secondary=False)
+        
+        # Se c'è callback virtuale, invia lì
+        if self.virtual_output_callback:
+            self.virtual_output_callback(mix)
         
         outdata[:] = mix
     
@@ -229,31 +243,33 @@ class AudioMixer:
         if status:
             print(f"Audio status secondario: {status}")
         
-        # Mix delle clip (usa posizione SECONDARIA separata)
-        mix = np.zeros((frames, 2), dtype=np.float32)
-        
-        for clip in self.clips.values():
-            if clip.is_playing:
-                clip_samples = clip.get_samples(frames, is_secondary=True)  # <-- IMPORTANTE
-                mix += clip_samples
-        
-        # Applica effetti
-        if self.reverb_enabled:
-            mix = AudioEffects.reverb(mix, self.reverb_amount)
-        
-        if self.bass_boost != 1.0:
-            mix = AudioEffects.eq_bass(mix, self.bass_boost, self.sample_rate)
-        
-        # Applica SECONDARY VOLUME (separato dal primario)
-        mix *= self.secondary_volume
-        
-        # Limiter per evitare clipping
-        mix = np.clip(mix, -1.0, 1.0)
+        # Genera mix con posizione secondaria separata
+        mix = self._generate_mix(frames, is_secondary=True)
         
         outdata[:] = mix
     
     def start(self):
         """Avvia lo stream audio"""
+        # Se ha virtual_output_callback, non serve stream fisico
+        if self.virtual_output_callback:
+            print("✓ AudioMixer in modalità virtuale (output verso ProMixer)")
+            # Avvia comunque un thread per generare audio
+            import threading
+            self._virtual_thread_running = True
+            
+            def virtual_audio_thread():
+                import time
+                while self._virtual_thread_running:
+                    # Genera mix e invia al callback
+                    mix = self._generate_mix(self.buffer_size, is_secondary=False)
+                    self.virtual_output_callback(mix)
+                    # Sleep per simulare il buffer time
+                    time.sleep(self.buffer_size / self.sample_rate)
+            
+            self._virtual_thread = threading.Thread(target=virtual_audio_thread, daemon=True)
+            self._virtual_thread.start()
+            return
+        
         # Determina numero di canali del dispositivo di output
         output_channels = 2  # default
         if self.output_device is not None:
@@ -339,6 +355,12 @@ class AudioMixer:
     
     def stop(self):
         """Ferma lo stream audio"""
+        # Ferma thread virtuale se attivo
+        if hasattr(self, '_virtual_thread_running'):
+            self._virtual_thread_running = False
+            if hasattr(self, '_virtual_thread'):
+                self._virtual_thread.join(timeout=1.0)
+        
         if self.stream:
             self.stream.stop()
             self.stream.close()

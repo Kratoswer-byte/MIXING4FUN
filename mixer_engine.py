@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Callable
 from dataclasses import dataclass
 from scipy import signal
 import queue
+import time
 
 
 @dataclass
@@ -119,7 +120,7 @@ class MixerChannel:
     
     def __init__(self, name: str, channel_type: str, sample_rate: int = 44100):
         self.name = name
-        self.channel_type = channel_type  # 'hardware', 'virtual', 'bus'
+        self.channel_type = channel_type  # 'hardware', 'virtual', 'bus', 'python'
         self.sample_rate = sample_rate
         
         # Controlli base
@@ -143,6 +144,12 @@ class MixerChannel:
         
         # Buffer audio
         self.audio_buffer = None
+        
+        # Input queue per canali "python" (ricevono audio da codice Python)
+        if channel_type == 'python':
+            self.input_queue = queue.Queue(maxsize=100)
+        else:
+            self.input_queue = None
         
         # Metering
         self.peak_level = -np.inf  # dB
@@ -188,6 +195,48 @@ class MixerChannel:
         # RMS
         rms = np.sqrt(np.mean(audio**2))
         self.rms_level = 20 * np.log10(np.maximum(rms, 1e-10))
+    
+    def push_audio(self, audio: np.ndarray):
+        """Invia audio al canale (per canali 'python')"""
+        if self.input_queue is not None:
+            try:
+                self.input_queue.put_nowait(audio.copy())
+            except queue.Full:
+                # Rimuovi il frame più vecchio e aggiungi quello nuovo
+                try:
+                    self.input_queue.get_nowait()
+                    self.input_queue.put_nowait(audio.copy())
+                except:
+                    pass
+    
+    def get_audio_from_queue(self, n_frames: int) -> np.ndarray:
+        """Leggi audio dalla queue (per canali 'python')"""
+        if self.input_queue is None:
+            return np.zeros((n_frames, 2))
+        
+        # Raccogli tutti i frame disponibili
+        frames = []
+        total_frames = 0
+        
+        while total_frames < n_frames and not self.input_queue.empty():
+            try:
+                frame = self.input_queue.get_nowait()
+                frames.append(frame)
+                total_frames += len(frame)
+            except queue.Empty:
+                break
+        
+        if not frames:
+            return np.zeros((n_frames, 2))
+        
+        # Concatena e ritaglia
+        audio = np.vstack(frames)
+        if len(audio) >= n_frames:
+            return audio[:n_frames]
+        else:
+            # Pad con silenzio
+            padding = np.zeros((n_frames - len(audio), 2))
+            return np.vstack([audio, padding])
     
     def process(self, audio: np.ndarray) -> np.ndarray:
         """Processa l'audio del canale"""
@@ -279,6 +328,10 @@ class ProMixer:
     
     def _init_default_channels(self):
         """Inizializza canali di default come Voicemeeter"""
+        # Canale Soundboard (input da Python)
+        soundboard_ch = MixerChannel("Soundboard", "python", self.sample_rate)
+        self.channels["SOUNDBOARD"] = soundboard_ch
+        
         # Hardware Inputs (3 come Voicemeeter)
         for i in range(1, 4):
             ch = MixerChannel(f"Hardware {i}", "hardware", self.sample_rate)
@@ -336,15 +389,25 @@ class ProMixer:
                 mix = np.zeros((frames, 2), dtype=np.float32)
                 
                 for ch_id, channel in self.channels.items():
-                    if channel.routing.get(bus_name, False) and channel.audio_buffer is not None:
-                        # Prendi audio dal buffer
+                    if not channel.routing.get(bus_name, False):
+                        continue
+                    
+                    # Ottieni audio dal canale
+                    audio = None
+                    
+                    if channel.channel_type == 'python':
+                        # Canale virtuale Python (es. soundboard)
+                        audio = channel.get_audio_from_queue(frames)
+                    elif channel.audio_buffer is not None:
+                        # Canale hardware/virtual con buffer
                         audio = channel.audio_buffer[:frames]
                         
                         # Pad se necessario
                         if len(audio) < frames:
                             padding = np.zeros((frames - len(audio), 2))
                             audio = np.vstack([audio, padding])
-                        
+                    
+                    if audio is not None and len(audio) > 0:
                         # Processa canale
                         processed = channel.process(audio)
                         
@@ -408,8 +471,17 @@ class ProMixer:
             device_info = sd.query_devices(bus.device_id)
             channels = min(device_info['max_output_channels'], 2)
             
+            # Usa il sample rate del device se diverso
+            device_samplerate = device_info.get('default_samplerate', self.sample_rate)
+            actual_samplerate = self.sample_rate
+            
+            # Se il device non supporta il nostro sample rate, usa quello di default
+            if device_samplerate != self.sample_rate:
+                print(f"⚠ Device {bus.device_id} usa {device_samplerate}Hz invece di {self.sample_rate}Hz")
+                actual_samplerate = int(device_samplerate)
+            
             stream = sd.OutputStream(
-                samplerate=self.sample_rate,
+                samplerate=actual_samplerate,
                 blocksize=self.buffer_size,
                 device=bus.device_id,
                 channels=channels,
@@ -418,8 +490,9 @@ class ProMixer:
             )
             stream.start()
             bus.stream = stream
+            bus.sample_rate = actual_samplerate  # Aggiorna sample rate del bus
             
-            print(f"✓ Output avviato: {bus_name} -> Device {bus.device_id} ({device_info['name']})")
+            print(f"✓ Output avviato: {bus_name} -> Device {bus.device_id} ({device_info['name']}) @ {actual_samplerate}Hz")
             return True
         except Exception as e:
             print(f"✗ Errore avvio output {bus_name}: {e}")

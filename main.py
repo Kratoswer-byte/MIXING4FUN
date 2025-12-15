@@ -509,11 +509,52 @@ class AudioMixerApp(ctk.CTk):
                 print(f"⚠ Errore validazione device: {e}")
                 output_device = None
         
-        # Mixer audio (soundboard)
-        print(f"🎛️ Inizializzazione mixer con:")
-        print(f"   Primary: {output_device}")
-        print(f"   Secondary: {secondary_output_device}")
-        self.mixer = AudioMixer(sample_rate=48000, buffer_size=512, output_device=output_device, secondary_output_device=secondary_output_device)  # 48kHz per Discord
+        # ProMixer (mixer professionale multi-canale)
+        print(f"🎛️ Inizializzazione ProMixer integrato...")
+        self.pro_mixer = ProMixer(sample_rate=48000, buffer_size=512)
+        self.pro_mixer_widgets = {}  # Widgets mixer tab
+        self.pro_mixer_running = False
+        
+        # Configura bus del ProMixer
+        self.pro_mixer.set_bus_device('A1', output_device if output_device else 61)  # CABLE o default
+        
+        # Valida secondary device prima di usarlo
+        if secondary_output_device:
+            try:
+                dev_info = devices[secondary_output_device]
+                if dev_info['max_output_channels'] > 0:
+                    self.pro_mixer.set_bus_device('A2', secondary_output_device)  # Cuffie
+                    print(f"✓ Bus A2 (Cuffie): Device {secondary_output_device} ({dev_info['name']})")
+                else:
+                    print(f"⚠ Device {secondary_output_device} non è un output valido, uso solo A1")
+                    secondary_output_device = None
+            except:
+                print(f"⚠ Device {secondary_output_device} non valido, uso solo A1")
+                secondary_output_device = None
+        
+        # Routing: Soundboard va su entrambi i bus A1 e A2
+        self.pro_mixer.set_channel_routing('SOUNDBOARD', 'A1', True)
+        if secondary_output_device:
+            self.pro_mixer.set_channel_routing('SOUNDBOARD', 'A2', True)
+        
+        print(f"✓ Bus A1 (CABLE/Discord): Device {output_device if output_device else 61}")
+        
+        # Callback per inviare audio soundboard al ProMixer
+        def soundboard_to_mixer_callback(audio):
+            """Invia audio dalla soundboard al canale SOUNDBOARD del ProMixer"""
+            if self.pro_mixer_running:
+                self.pro_mixer.channels['SOUNDBOARD'].push_audio(audio)
+        
+        # Mixer audio (soundboard) - ora invia al ProMixer invece che ai device
+        print(f"🎛️ Inizializzazione soundboard (integrata con ProMixer)...")
+        self.mixer = AudioMixer(
+            sample_rate=48000, 
+            buffer_size=512, 
+            output_device=None,  # Non usa più device diretti
+            secondary_output_device=None,
+            virtual_output_callback=soundboard_to_mixer_callback  # Invia al ProMixer
+        )
+        
         self.clip_widgets: Dict[str, ClipButton] = {}
         self.waiting_for_hotkey = None
         self.hotkey_bindings = {}
@@ -521,11 +562,6 @@ class AudioMixerApp(ctk.CTk):
         self.soundboard_enabled = True  # Stato abilitazione soundboard
         self.loop_enabled = False  # Stato loop globale
         self.temp_listener = None  # Listener temporaneo per assegnazione hotkey
-        
-        # ProMixer (mixer professionale multi-canale)
-        self.pro_mixer = ProMixer(sample_rate=48000, buffer_size=512)
-        self.pro_mixer_widgets = {}  # Widgets mixer tab
-        self.pro_mixer_running = False
         
         # Sistema pagine soundboard
         self.current_page = 1
@@ -566,7 +602,12 @@ class AudioMixerApp(ctk.CTk):
         self.create_audio_settings_tab()
         self.create_control_panel()
         
-        # Avvia mixer
+        # Avvia ProMixer
+        print("\n🎛️ Avvio ProMixer...")
+        self.pro_mixer.start_all()
+        self.pro_mixer_running = True
+        
+        # Avvia mixer soundboard
         self.mixer.start()
         
         # Carica configurazione salvata
