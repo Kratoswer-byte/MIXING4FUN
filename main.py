@@ -1342,7 +1342,7 @@ class AudioMixerApp(ctk.CTk):
         # Intestazione
         header = ctk.CTkLabel(
             self.tab_audio_settings,
-            text="🔊 Configurazione Dispositivi Audio (Dual Output)",
+            text="🔊 Configurazione Bus Output A1/A2 (Mixer + Soundboard)",
             font=ctk.CTkFont(size=20, weight="bold")
         )
         header.grid(row=0, column=0, pady=(20, 10), padx=20, sticky="w")
@@ -1359,7 +1359,7 @@ class AudioMixerApp(ctk.CTk):
         
         ctk.CTkLabel(
             primary_frame,
-            text="📤 Output Primario (Discord via Voicemeeter)",
+            text="📤 Bus A1 - Output Primario (Discord/Streaming)",
             font=ctk.CTkFont(size=16, weight="bold"),
             text_color=COLORS["accent"]
         ).grid(row=0, column=0, columnspan=2, pady=(15, 10), padx=15, sticky="w")
@@ -1391,7 +1391,7 @@ class AudioMixerApp(ctk.CTk):
         
         ctk.CTkLabel(
             secondary_frame,
-            text="🎧 Output Secondario (Ascolto Diretto - Cuffie)",
+            text="🎧 Bus A2 - Output Secondario (Monitor/Cuffie)",
             font=ctk.CTkFont(size=16, weight="bold"),
             text_color=COLORS["success"]
         ).grid(row=0, column=0, columnspan=2, pady=(15, 10), padx=15, sticky="w")
@@ -1443,20 +1443,25 @@ class AudioMixerApp(ctk.CTk):
         info_frame = ctk.CTkFrame(main_container, fg_color=COLORS["bg_card"])
         info_frame.grid(row=3, column=0, pady=10, sticky="ew")
         
-        info_text = """💡 CONFIGURAZIONE DUAL OUTPUT:
+        info_text = """💡 CONFIGURAZIONE BUS A1/A2 (MIXER + SOUNDBOARD):
 
-📤 Output Primario (obbligatorio):
-   • Seleziona "CABLE Input" per inviare a Voicemeeter → Discord
-   • L'audio viene mixato con microfono e inviato a Discord
+📤 Bus A1 - Output Primario (obbligatorio):
+   • Corrisponde al Bus A1 del Mixer Professionale
+   • Seleziona "CABLE Input" per inviare a Discord/Streaming
+   • Usato per soundboard E mixer
 
-🎧 Output Secondario (opzionale):
-   • Seleziona le tue cuffie per sentirti le clip direttamente
-   • Utile se Voicemeeter è configurato solo per Discord
-   • L'audio sarà inviato CONTEMPORANEAMENTE a entrambi gli output
+🎧 Bus A2 - Output Secondario (opzionale):
+   • Corrisponde al Bus A2 del Mixer Professionale
+   • Seleziona le tue cuffie per monitoraggio diretto
+   • L'audio sarà inviato CONTEMPORANEAMENTE a A1 e A2
+
+🎛️ Integrazione Mixer:
+   • Questi bus sono condivisi tra Soundboard e Mixer
+   • Configurali anche nel tab 🎛️ Mixer per routing avanzato
 
 ⚡ Raccomandazione:
-   • Primary: CABLE Input (VB-Audio Virtual Cable) 48kHz
-   • Secondary: Headphones (Realtek HD Audio) o le tue cuffie"""
+   • Bus A1: CABLE Input (VB-Audio Virtual Cable) 48kHz
+   • Bus A2: Headphones (Realtek HD Audio) o le tue cuffie"""
         
         ctk.CTkLabel(
             info_frame,
@@ -1581,27 +1586,38 @@ class AudioMixerApp(ctk.CTk):
             
             print("✓ Configurazione salvata su disco")
             
-            # Riavvia mixer con nuovi dispositivi
+            # Riavvia mixer soundboard con nuovi dispositivi
             self.mixer.stop()
             self.mixer.output_device = primary_device
             self.mixer.secondary_output_device = secondary_device
             
-            print(f"🔄 Riavvio mixer:")
-            print(f"   Primary: {primary_device}")
-            print(f"   Secondary: {secondary_device}")
+            print(f"🔄 Riavvio mixer soundboard:")
+            print(f"   Primary (A1): {primary_device}")
+            print(f"   Secondary (A2): {secondary_device}")
             
             self.mixer.start()
+            
+            # Sincronizza i bus A1/A2 del ProMixer con gli stessi dispositivi
+            print(f"🎛️ Sincronizzazione bus ProMixer:")
+            self.pro_mixer.buses['A1'].device_id = primary_device
+            print(f"   Bus A1 → Device {primary_device}")
+            
+            if secondary_device is not None:
+                self.pro_mixer.buses['A2'].device_id = secondary_device
+                print(f"   Bus A2 → Device {secondary_device}")
             
             # Messaggio conferma
             devices = sd.query_devices()
             primary_name = devices[primary_device]['name']
-            msg = f"✓ Output Primario:\n{primary_name}"
+            msg = f"✓ Bus A1 (Primary Output):\n{primary_name}"
             
             if secondary_device is not None:
                 secondary_name = devices[secondary_device]['name']
-                msg += f"\n\n✓ Output Secondario:\n{secondary_name}"
+                msg += f"\n\n✓ Bus A2 (Secondary Output):\n{secondary_name}"
             
-            messagebox.showinfo("Configurazione Applicata", msg + "\n\nIl mixer è stato riavviato.")
+            msg += "\n\n🎛️ I bus del mixer sono stati sincronizzati!"
+            
+            messagebox.showinfo("Configurazione Applicata", msg + "\n\nLa soundboard è stata riavviata.")
             
         except Exception as e:
             messagebox.showerror("Errore", f"Impossibile applicare configurazione:\n{str(e)}")
@@ -1673,6 +1689,15 @@ class AudioMixerApp(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold")
         )
         config_btn.grid(row=0, column=2, padx=5)
+        
+        # Info sync A1/A2
+        info_sync = ctk.CTkLabel(
+            header_frame,
+            text="ℹ️ Bus A1/A2 sincronizzati con tab 🔊 Audio (Soundboard Output)",
+            font=ctk.CTkFont(size=11),
+            text_color=COLORS["text_secondary"]
+        )
+        info_sync.grid(row=1, column=0, columnspan=2, pady=(5, 0), sticky="w")
         
         # Main mixer container
         mixer_container = ctk.CTkScrollableFrame(
@@ -2943,7 +2968,33 @@ class MixerConfigWindow(ctk.CTkToplevel):
                 if device:
                     strip.device_label.configure(text=device.name[:25])
             
-            messagebox.showinfo("✓ Configurato", f"Bus {bus_name} → Device {device_id}\n\nRicorda di avviare il mixer!")
+            # 🎯 SINCRONIZZAZIONE CON SOUNDBOARD
+            # Se si configura A1 o A2, aggiorna anche la soundboard
+            if bus_name == 'A1':
+                print(f"🔄 Sincronizzazione Bus A1 → Soundboard Primary Output")
+                self.parent.mixer.output_device = device_id
+                # Salva nel config
+                config = self.parent.load_config_dict()
+                config['audio_output_device'] = device_id
+                with open(self.parent.config_file, 'w', encoding='utf-8') as f:
+                    json.dump(config, f, indent=2, ensure_ascii=False)
+                print(f"   ✓ Primary Output aggiornato a device {device_id}")
+            
+            elif bus_name == 'A2':
+                print(f"🔄 Sincronizzazione Bus A2 → Soundboard Secondary Output")
+                self.parent.mixer.secondary_output_device = device_id
+                # Salva nel config
+                config = self.parent.load_config_dict()
+                config['secondary_output_device'] = device_id
+                with open(self.parent.config_file, 'w', encoding='utf-8') as f:
+                    json.dump(config, f, indent=2, ensure_ascii=False)
+                print(f"   ✓ Secondary Output aggiornato a device {device_id}")
+            
+            msg = f"Bus {bus_name} → Device {device_id}\n\nRicorda di avviare il mixer!"
+            if bus_name in ['A1', 'A2']:
+                msg += f"\n\n🎯 Soundboard sincronizzata automaticamente!"
+            
+            messagebox.showinfo("✓ Configurato", msg)
         except Exception as e:
             messagebox.showerror("Errore", str(e))
 
