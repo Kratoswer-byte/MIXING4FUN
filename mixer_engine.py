@@ -142,6 +142,9 @@ class MixerChannel:
         # Processing
         self.processor = AudioProcessor(sample_rate)
         
+        # Source per canali python (riferimento diretto al mixer)
+        self.audio_source = None  # Per canali 'python', punta all'AudioMixer
+        
         # Buffer audio
         self.audio_buffer = None
         
@@ -217,6 +220,7 @@ class MixerChannel:
         # Raccogli tutti i frame disponibili
         frames = []
         total_frames = 0
+        queue_size = self.input_queue.qsize()
         
         while total_frames < n_frames and not self.input_queue.empty():
             try:
@@ -227,15 +231,24 @@ class MixerChannel:
                 break
         
         if not frames:
-            return np.zeros((n_frames, 2))
+            # UNDERRUN: nessun dato disponibile - ritorna silenzio
+            return np.zeros((n_frames, 2), dtype=np.float32)
         
         # Concatena e ritaglia
         audio = np.vstack(frames)
         if len(audio) >= n_frames:
-            return audio[:n_frames]
+            result = audio[:n_frames]
+            # Se abbiamo letto più del necessario, rimetti in coda
+            if len(audio) > n_frames:
+                remainder = audio[n_frames:]
+                try:
+                    self.input_queue.put_nowait(remainder)
+                except:
+                    pass
+            return result
         else:
-            # Pad con silenzio
-            padding = np.zeros((n_frames - len(audio), 2))
+            # Pad con silenzio - underrun parziale
+            padding = np.zeros((n_frames - len(audio), 2), dtype=np.float32)
             return np.vstack([audio, padding])
     
     def process(self, audio: np.ndarray) -> np.ndarray:
@@ -316,6 +329,7 @@ class ProMixer:
         
         # Streams attivi
         self.input_streams: Dict[str, sd.InputStream] = {}
+        self.input_device_map: Dict[str, int] = {}  # Mappa channel_id -> device_id per salvataggio config
         self.is_running = False
         
         # Lock per thread-safety
@@ -375,18 +389,37 @@ class ProMixer:
                     
                     # Salva nel buffer del canale
                     self.channels[channel_id].audio_buffer = audio
+                    
+                    # Aggiorna metering per VU meter
+                    self.channels[channel_id].update_metering(audio)
         
         return callback
     
     def audio_output_callback(self, bus_name: str):
         """Genera callback per output stream"""
-        def callback(outdata, frames, time, status):
+        import time as time_module
+        callback_count = [0]
+        error_count = [0]
+        
+        def callback(outdata, frames, time_info, status):
+            callback_count[0] += 1
+            
+            # Log SOLO errori critici (max 5)
             if status:
-                print(f"[{bus_name}] Status: {status}")
+                if error_count[0] < 5:
+                    error_count[0] += 1
+                    print(f"🔴 [{bus_name}] Audio error #{error_count[0]}: {status}")
+                # In caso di errore, riempi con silenzio e continua
+                if status.output_underflow:
+                    outdata.fill(0)
+                    return
             
             with self.lock:
+                bus = self.buses[bus_name]
+                
                 # Mix di tutti i canali routati verso questo bus
                 mix = np.zeros((frames, 2), dtype=np.float32)
+                active_channels = 0
                 
                 for ch_id, channel in self.channels.items():
                     if not channel.routing.get(bus_name, False):
@@ -397,25 +430,35 @@ class ProMixer:
                     
                     if channel.channel_type == 'python':
                         # Canale virtuale Python (es. soundboard)
-                        audio = channel.get_audio_from_queue(frames)
+                        # Se ha un audio_source, tira l'audio direttamente
+                        if channel.audio_source:
+                            # Passa il nome del bus come stream_id per posizioni indipendenti
+                            audio = channel.audio_source.get_audio(frames, stream_id=bus_name)
+                        else:
+                            # Fallback: usa la queue (legacy)
+                            audio = channel.get_audio_from_queue(frames)
                     elif channel.audio_buffer is not None:
                         # Canale hardware/virtual con buffer
-                        audio = channel.audio_buffer[:frames]
+                        # Prendi esattamente frames samples, troncando o padding
+                        buffer_len = len(channel.audio_buffer)
                         
-                        # Pad se necessario
-                        if len(audio) < frames:
-                            padding = np.zeros((frames - len(audio), 2))
-                            audio = np.vstack([audio, padding])
+                        if buffer_len >= frames:
+                            # Buffer sufficiente: prendi primi frames samples
+                            audio = channel.audio_buffer[:frames].copy()
+                        else:
+                            # Buffer insufficiente: pad con zeri
+                            padding = np.zeros((frames - buffer_len, 2), dtype=np.float32)
+                            audio = np.vstack([channel.audio_buffer, padding])
                     
                     if audio is not None and len(audio) > 0:
-                        # Processa canale
+                        # Processa canale (applica gain, effetti, pan)
                         processed = channel.process(audio)
                         
                         # Aggiungi al mix
                         mix += processed
+                        active_channels += 1
                 
                 # Applica master volume del bus
-                bus = self.buses[bus_name]
                 if not bus.mute:
                     mix *= bus.master_volume
                 else:
@@ -427,8 +470,15 @@ class ProMixer:
                 # Metering
                 bus.update_metering(mix)
                 
-                # Output
-                outdata[:] = mix
+                # Verifica dimensioni finali
+                if mix.shape[0] != frames or mix.shape[1] != 2:
+                    print(f"❌ [{bus_name}] ERRORE DIMENSIONI OUTPUT!")
+                    print(f"   Mix shape: {mix.shape}, atteso: ({frames}, 2)")
+                    # Riempi con silenzio
+                    outdata.fill(0)
+                else:
+                    # Output
+                    outdata[:] = mix
                 
                 # Callback UI per metering
                 if self.metering_callback:
@@ -442,6 +492,14 @@ class ProMixer:
             device_info = sd.query_devices(device_id)
             channels = min(device_info['max_input_channels'], 2)
             
+            # Rinomina il canale con il nome del device
+            if channel_id in self.channels:
+                device_name = device_info['name']
+                # Accorcia il nome se troppo lungo
+                if len(device_name) > 20:
+                    device_name = device_name[:17] + "..."
+                self.channels[channel_id].name = device_name
+            
             stream = sd.InputStream(
                 samplerate=self.sample_rate,
                 blocksize=self.buffer_size,
@@ -452,6 +510,17 @@ class ProMixer:
             )
             stream.start()
             self.input_streams[channel_id] = stream
+            self.input_device_map[channel_id] = device_id  # Salva per config
+            
+            # Attiva routing automatico SOLO verso A1 (Discord/streaming)
+            # A2 (cuffie) rimane disattivato per evitare feedback del microfono
+            if channel_id in self.channels:
+                if 'A1' in self.buses and self.buses['A1'].device_id is not None:
+                    self.set_channel_routing(channel_id, 'A1', True)
+                    print(f"   ✓ Routing automatico: {channel_id} → A1 (Output principale)")
+                
+                # Imposta fader a 0 dB (unity gain)
+                self.channels[channel_id].set_fader_db(0.0)
             
             print(f"✓ Input avviato: {channel_id} -> Device {device_id} ({device_info['name']})")
             return True
@@ -467,32 +536,48 @@ class ProMixer:
             print(f"⚠ Bus {bus_name} non ha dispositivo assegnato")
             return False
         
+        # Se lo stream è già attivo, non fare nulla
+        if bus.stream is not None:
+            try:
+                if bus.stream.active:
+                    print(f"⚠ Bus {bus_name} già attivo, skip")
+                    return True
+            except:
+                pass  # Stream non valido, continua ad avviarne uno nuovo
+        
         try:
             device_info = sd.query_devices(bus.device_id)
             channels = min(device_info['max_output_channels'], 2)
             
-            # Usa il sample rate del device se diverso
-            device_samplerate = device_info.get('default_samplerate', self.sample_rate)
-            actual_samplerate = self.sample_rate
+            # USA SEMPRE il sample rate nativo del dispositivo
+            # Windows WASAPI non supporta sample rate diversi
+            device_samplerate = int(device_info.get('default_samplerate', 48000))
             
-            # Se il device non supporta il nostro sample rate, usa quello di default
+            # FORZA il sample rate del ProMixer a coincidere col device
             if device_samplerate != self.sample_rate:
-                print(f"⚠ Device {bus.device_id} usa {device_samplerate}Hz invece di {self.sample_rate}Hz")
-                actual_samplerate = int(device_samplerate)
+                print(f"⚠️ Device {bus.device_id} ha sample rate {device_samplerate}Hz")
+                print(f"   ProMixer forzato da {self.sample_rate}Hz a {device_samplerate}Hz")
+                self.sample_rate = device_samplerate
+                # Aggiorna tutti i canali e bus
+                for ch in self.channels.values():
+                    ch.sample_rate = device_samplerate
+                for b in self.buses.values():
+                    b.sample_rate = device_samplerate
             
             stream = sd.OutputStream(
-                samplerate=actual_samplerate,
+                samplerate=device_samplerate,
                 blocksize=self.buffer_size,
                 device=bus.device_id,
                 channels=channels,
                 dtype='float32',
-                callback=self.audio_output_callback(bus_name)
+                callback=self.audio_output_callback(bus_name),
+                prime_output_buffers_using_stream_callback=True  # Pre-buffering per audio più fluido
             )
             stream.start()
             bus.stream = stream
-            bus.sample_rate = actual_samplerate  # Aggiorna sample rate del bus
+            bus.sample_rate = device_samplerate
             
-            print(f"✓ Output avviato: {bus_name} -> Device {bus.device_id} ({device_info['name']}) @ {actual_samplerate}Hz")
+            print(f"✓ Output avviato: {bus_name} -> Device {bus.device_id} ({device_info['name']}) @ {device_samplerate}Hz")
             return True
         except Exception as e:
             print(f"✗ Errore avvio output {bus_name}: {e}")
@@ -500,6 +585,11 @@ class ProMixer:
     
     def start_all(self):
         """Avvia tutti gli stream configurati"""
+        # Se già running, ferma tutto prima di riavviare
+        if self.is_running:
+            print("⚠ Mixer già avviato, fermo e riavvio...")
+            self.stop_all()
+        
         self.is_running = True
         
         # Avvia output buses
@@ -525,6 +615,15 @@ class ProMixer:
                 bus.stream.stop()
                 bus.stream.close()
                 bus.stream = None
+        
+        # Reset posizioni delle clip soundboard per evitare audio veloce al riavvio
+        for channel in self.channels.values():
+            if channel.audio_source:
+                # Resetta le posizioni di tutte le clip nell'audio_source
+                if hasattr(channel.audio_source, 'clips'):
+                    for clip in channel.audio_source.clips.values():
+                        if hasattr(clip, 'positions'):
+                            clip.positions = {}
         
         print("✓ Mixer fermato")
     

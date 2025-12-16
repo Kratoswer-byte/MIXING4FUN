@@ -17,12 +17,6 @@ import json
 import sounddevice as sd
 from functools import partial
 from PIL import Image, ImageDraw
-
-# Import moduli UI
-from ui.colors import COLORS
-from ui.clip_button import ClipButton
-from ui.config_windows import MixerConfigWindow
-
 try:
     import pystray
     TRAY_AVAILABLE = True
@@ -52,8 +46,416 @@ logger = logging.getLogger(__name__)
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
+COLORS = {
+    "bg_primary": "#0d1117",      # Nero più morbido
+    "bg_secondary": "#161b22",    # Grigio scuro
+    "bg_card": "#1f2937",         # Card background
+    "accent": "#3b82f6",          # Blu moderno
+    "accent_hover": "#2563eb",    # Blu hover
+    "text": "#f3f4f6",            # Testo chiaro
+    "text_muted": "#9ca3af",      # Testo secondario
+    "text_secondary": "#6b7280",  # Testo terziario
+    "success": "#10b981",         # Verde
+    "warning": "#f59e0b",         # Arancione
+    "danger": "#ef4444",          # Rosso
+    "error": "#dc2626",           # Rosso errore
+    "border": "#374151"           # Bordi
+}
 
-# ===== CLASSE PRINCIPALE APPLICAZIONE =====
+
+class ClipButton(ctk.CTkFrame):
+    """Widget personalizzato per una clip audio (compatto ed espandibile)"""
+    
+    def __init__(self, parent, clip_name: str, on_play, on_stop, on_remove, on_volume_change, on_hotkey_change, app=None):
+        super().__init__(parent, fg_color=COLORS["bg_card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
+        
+        self.clip_name = clip_name
+        self.on_play = on_play
+        self.on_stop = on_stop
+        self.on_remove = on_remove
+        self.on_volume_change = on_volume_change
+        self.on_hotkey_change = on_hotkey_change
+        self.app = app  # Riferimento diretto all'app principale
+        self.is_playing = False
+        self.hotkey = None
+        self.is_expanded = False
+        self._is_destroyed = False  # Flag per prevenire aggiornamenti dopo destroy
+        
+        self.grid_columnconfigure(0, weight=1)
+        
+        # Menu contestuale per cambio pagina rapido
+        self.context_menu = None
+        
+        # ===== VERSIONE COMPATTA (sempre visibile) =====
+        compact_frame = ctk.CTkFrame(self, fg_color="transparent")
+        compact_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+        compact_frame.grid_columnconfigure(1, weight=1)
+        
+        # Bind tasto destro per menu contestuale
+        self.bind("<Button-3>", self.show_context_menu)
+        compact_frame.bind("<Button-3>", self.show_context_menu)
+        
+        # Pulsante Play/Stop (piccolo)
+        self.play_button = ctk.CTkButton(
+            compact_frame,
+            text="▶",
+            width=40,
+            height=40,
+            command=self.toggle_play,
+            fg_color=COLORS["success"],
+            hover_color="#059669",
+            font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"),
+            corner_radius=10
+        )
+        self.play_button.grid(row=0, column=0, padx=(0, 10))
+        self.play_button.bind("<Button-3>", self.show_context_menu)
+        
+        # Info clip (nome + hotkey)
+        info_frame = ctk.CTkFrame(compact_frame, fg_color="transparent")
+        info_frame.bind("<Button-3>", self.show_context_menu)
+        info_frame.grid(row=0, column=1, sticky="ew")
+        info_frame.grid_columnconfigure(0, weight=1)
+        
+        self.name_label = ctk.CTkLabel(
+            info_frame, 
+            text=clip_name[:30] + "..." if len(clip_name) > 30 else clip_name,
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+            text_color=COLORS["text"],
+            anchor="w"
+        )
+        self.name_label.grid(row=0, column=0, sticky="w")
+        self.name_label.bind("<Button-3>", self.show_context_menu)
+        
+        self.hotkey_label = ctk.CTkLabel(
+            info_frame,
+            text="No hotkey",
+            font=ctk.CTkFont(family="Segoe UI", size=10),
+            text_color=COLORS["text_muted"],
+            anchor="w"
+        )
+        self.hotkey_label.grid(row=1, column=0, sticky="w")
+        self.hotkey_label.bind("<Button-3>", self.show_context_menu)
+        
+        # Pulsante Espandi/Comprimi
+        self.expand_button = ctk.CTkButton(
+            compact_frame,
+            text="▼",
+            width=40,
+            height=40,
+            command=self.toggle_expand,
+            fg_color=COLORS["bg_secondary"],
+            hover_color=COLORS["border"],
+            font=ctk.CTkFont(family="Segoe UI", size=14),
+            corner_radius=10
+        )
+        self.expand_button.grid(row=0, column=2, padx=(10, 0))
+        self.expand_button.bind("<Button-3>", self.show_context_menu)
+        
+        # ===== VERSIONE ESPANSA (nascosta di default) =====
+        self.expanded_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.expanded_frame.grid_columnconfigure(0, weight=1)
+        
+        # Volume slider
+        vol_frame = ctk.CTkFrame(self.expanded_frame, fg_color="transparent")
+        vol_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=(5, 5))
+        vol_frame.grid_columnconfigure(1, weight=1)
+        
+        self.volume_label = ctk.CTkLabel(
+            vol_frame,
+            text="🔊 Volume: 100%",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=COLORS["text"]
+        )
+        self.volume_label.grid(row=0, column=0, padx=(0, 10), sticky="w")
+        
+        self.volume_slider = ctk.CTkSlider(
+            vol_frame,
+            from_=0,
+            to=100,
+            command=self.on_volume_changed,
+            button_color=COLORS["accent"],
+            button_hover_color=COLORS["accent_hover"],
+            progress_color=COLORS["accent"],
+            height=16
+        )
+        self.volume_slider.set(100)
+        self.volume_slider.grid(row=0, column=1, sticky="ew")
+        
+        # Hotkey assignment
+        hotkey_frame = ctk.CTkFrame(self.expanded_frame, fg_color="transparent")
+        hotkey_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 5))
+        
+        ctk.CTkLabel(
+            hotkey_frame,
+            text="⌨️ Hotkey:",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=COLORS["text"]
+        ).grid(row=0, column=0, padx=(0, 10), sticky="w")
+        
+        self.hotkey_button = ctk.CTkButton(
+            hotkey_frame,
+            text="Assegna tasto",
+            height=28,
+            command=self.assign_hotkey,
+            fg_color=COLORS["bg_secondary"],
+            hover_color=COLORS["border"],
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            corner_radius=8
+        )
+        self.hotkey_button.grid(row=0, column=1, sticky="w")
+        
+        # Selettore pagina
+        page_frame = ctk.CTkFrame(self.expanded_frame, fg_color="transparent")
+        page_frame.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 5))
+        
+        ctk.CTkLabel(
+            page_frame,
+            text="📑 Pagina:",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=COLORS["text"]
+        ).grid(row=0, column=0, padx=(0, 10), sticky="w")
+        
+        self.page_selector = ctk.CTkOptionMenu(
+            page_frame,
+            values=["F1", "F2", "F3", "F4", "F5"],
+            height=28,
+            command=self.on_page_changed,
+            fg_color=COLORS["bg_secondary"],
+            button_color=COLORS["accent"],
+            button_hover_color=COLORS["accent_hover"],
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            dropdown_font=ctk.CTkFont(family="Segoe UI", size=11)
+        )
+        self.page_selector.set("F1")
+        self.page_selector.grid(row=0, column=1, sticky="w")
+        
+        # Pulsante Rimuovi
+        self.remove_button = ctk.CTkButton(
+            self.expanded_frame,
+            text="🗑️ Rimuovi clip",
+            height=32,
+            command=self.confirm_remove,
+            fg_color=COLORS["danger"],
+            hover_color="#b91c1c",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            corner_radius=8
+        )
+        self.remove_button.grid(row=2, column=0, sticky="ew", padx=8, pady=(5, 8))
+    
+    def toggle_expand(self):
+        """Espandi/Comprimi pannello controlli"""
+        if self._is_destroyed:
+            return
+        try:
+            if self.is_expanded:
+                # Comprimi
+                self.expanded_frame.grid_forget()
+                self.expand_button.configure(text="▼")
+                self.is_expanded = False
+            else:
+                # Espandi
+                self.expanded_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+                self.expand_button.configure(text="▲")
+                self.is_expanded = True
+        except Exception:
+            pass  # Widget già distrutto, ignora l'errore
+    
+    def toggle_play(self):
+        """Toggle play/stop"""
+        if self._is_destroyed:
+            return
+        if self.is_playing:
+            self.stop()
+        else:
+            self.play()
+    
+    def play(self):
+        """Avvia la riproduzione"""
+        if self._is_destroyed:
+            return
+        
+        # Verifica che la clip sia nella pagina corrente
+        if self.app:
+            try:
+                clip_page = self.app.clip_pages.get(self.clip_name, 1)
+                current_page = self.app.current_page
+                if clip_page != current_page:
+                    logger.warning(f"Impossibile riprodurre clip '{self.clip_name}': non nella pagina corrente")
+                    return
+            except Exception as e:
+                logger.error(f"Errore verifica pagina: {e}")
+        
+        self.is_playing = True
+        try:
+            self.play_button.configure(text="⏸", fg_color=COLORS["warning"], hover_color="#d97706")
+        except Exception:
+            pass
+        self.on_play(self.clip_name)
+    
+    def stop(self):
+        """Ferma la riproduzione"""
+        if self._is_destroyed:
+            return
+        self.is_playing = False
+        try:
+            self.play_button.configure(text="▶", fg_color=COLORS["success"], hover_color="#059669")
+        except Exception:
+            pass
+        self.on_stop(self.clip_name)
+    
+    def on_volume_changed(self, value):
+        """Callback per cambio volume"""
+        if self._is_destroyed:
+            return
+        volume_pct = int(value)
+        try:
+            self.volume_label.configure(text=f"🔊 Volume: {volume_pct}%")
+        except Exception:
+            pass
+        self.on_volume_change(self.clip_name, value / 100.0)
+    
+    def on_page_changed(self, page_str):
+        """Callback quando cambia la pagina della clip"""
+        page_num = int(page_str[1])  # "F1" -> 1
+        # Notifica il parent (SoundboardApp) del cambio pagina
+        if self.app:
+            self.app.clip_pages[self.clip_name] = page_num
+            self.app.save_config()
+            self.app.update_clips_visibility()
+            logger.info(f"Clip '{self.clip_name}' spostata su pagina {page_num}")
+    
+    def set_page(self, page_num):
+        """Imposta la pagina corrente della clip"""
+        self.page_selector.set(f"F{page_num}")
+    
+    def show_context_menu(self, event):
+        """Mostra menu contestuale per spostare clip tra pagine"""
+        try:
+            import tkinter as tk
+            if self.context_menu:
+                self.context_menu.destroy()
+            
+            self.context_menu = tk.Menu(self, tearoff=0, bg=COLORS["bg_secondary"], fg=COLORS["text"],
+                                        activebackground=COLORS["accent"], activeforeground="white",
+                                        font=("Segoe UI", 10))
+            
+            # Ottieni pagina corrente
+            current_page = self.master.master.master.master.master.clip_pages.get(self.clip_name, 1)
+            
+            self.context_menu.add_command(label="📑 Sposta in pagina:", state="disabled")
+            self.context_menu.add_separator()
+            
+            for page_num in range(1, 6):
+                label = f"  F{page_num} (Pagina {page_num})"
+                if page_num == current_page:
+                    label += " ✓"
+                self.context_menu.add_command(
+                    label=label,
+                    command=lambda p=page_num: self.move_to_page(p)
+                )
+            
+            self.context_menu.tk_popup(event.x_root, event.y_root)
+        except Exception as e:
+            logger.error(f"Errore nel menu contestuale: {e}")
+        finally:
+            if self.context_menu:
+                self.context_menu.grab_release()
+    
+    def move_to_page(self, page_num):
+        """Sposta la clip in una pagina specifica"""
+        self.page_selector.set(f"F{page_num}")
+        self.on_page_changed(f"F{page_num}")
+    
+    def show_context_menu(self, event):
+        """Mostra menu contestuale per spostare clip tra pagine"""
+        if not self.app:
+            return
+        
+        try:
+            import tkinter as tk
+            if self.context_menu:
+                self.context_menu.destroy()
+            
+            self.context_menu = tk.Menu(self, tearoff=0, bg=COLORS["bg_secondary"], fg=COLORS["text"],
+                                        activebackground=COLORS["accent"], activeforeground="white",
+                                        font=("Segoe UI", 10))
+            
+            # Ottieni pagina corrente
+            current_page = self.app.clip_pages.get(self.clip_name, 1)
+            
+            self.context_menu.add_command(label="📑 Sposta in pagina:", state="disabled")
+            self.context_menu.add_separator()
+            
+            for page_num in range(1, 6):
+                label = f"  F{page_num} (Pagina {page_num})"
+                if page_num == current_page:
+                    label += " ✓"
+                self.context_menu.add_command(
+                    label=label,
+                    command=lambda p=page_num: self.move_to_page(p)
+                )
+            
+            self.context_menu.tk_popup(event.x_root, event.y_root)
+        except Exception as e:
+            logger.error(f"Errore nel menu contestuale: {e}")
+        finally:
+            if self.context_menu:
+                self.context_menu.grab_release()
+    
+    def move_to_page(self, page_num):
+        """Sposta la clip in una pagina specifica"""
+        self.page_selector.set(f"F{page_num}")
+        self.on_page_changed(f"F{page_num}")
+    
+    def assign_hotkey(self):
+        """Assegna una hotkey alla clip"""
+        if self._is_destroyed:
+            return
+        try:
+            self.hotkey_button.configure(text="Premi un tasto...")
+        except Exception:
+            pass
+        self.on_hotkey_change(self.clip_name, self)
+    
+    def set_hotkey(self, key: str):
+        """Imposta la hotkey visualizzata"""
+        if self._is_destroyed:
+            return
+        self.hotkey = key
+        try:
+            self.hotkey_button.configure(text=f"Tasto: {key.upper()}")
+            self.hotkey_label.configure(text=f"⌨️ {key.upper()}")
+        except Exception:
+            pass
+    
+    def confirm_remove(self):
+        """Mostra dialog di conferma prima di rimuovere"""
+        if self._is_destroyed:
+            return
+        from tkinter import messagebox
+        
+        result = messagebox.askyesno(
+            "Conferma Rimozione",
+            f"Vuoi rimuovere la clip '{self.clip_name}'?\n\n"
+            "⚠️ ATTENZIONE: Questa azione:\n"
+            "• Rimuoverà la clip dalla soundboard\n"
+            "• Rimuoverà l'hotkey assegnato\n"
+            "• ELIMINERÀ il file dalla cartella clips/\n\n"
+            "Continuare?",
+            icon='warning'
+        )
+        
+        if result:
+            self.on_remove(self.clip_name)
+    
+    def destroy(self):
+        """Override destroy per prevenire errori durante la pulizia"""
+        self._is_destroyed = True
+        try:
+            super().destroy()
+        except Exception:
+            pass
+
 
 class AudioMixerApp(ctk.CTk):
     """Applicazione principale"""
@@ -120,8 +522,7 @@ class AudioMixerApp(ctk.CTk):
             except:
                 print(f"   Uso sample rate default: {primary_sr} Hz")
         
-        # Buffer più grande (1024) per evitare audio a scatti e dropout
-        self.pro_mixer = ProMixer(sample_rate=primary_sr, buffer_size=1024)
+        self.pro_mixer = ProMixer(sample_rate=primary_sr, buffer_size=512)
         self.pro_mixer_widgets = {}  # Widgets mixer tab
         self.pro_mixer_running = False
         
@@ -153,7 +554,7 @@ class AudioMixerApp(ctk.CTk):
         print(f"🎛️ Inizializzazione soundboard (integrata con ProMixer)...")
         self.mixer = AudioMixer(
             sample_rate=primary_sr,  # Usa lo stesso sample rate del ProMixer
-            buffer_size=1024,  # Buffer grande per evitare audio a scatti
+            buffer_size=512,
             virtual_output_callback=lambda audio: None  # Callback per ProMixer
         )
         
@@ -221,9 +622,6 @@ class AudioMixerApp(ctk.CTk):
         
         # Carica configurazione salvata
         self.load_config()
-        
-        # Ripristina configurazione ProMixer dopo il caricamento
-        self.restore_promixer_config()
         
         # Registra hotkey globale per toggle soundboard (Scroll Lock)
         # Usa hook_key per compatibilità con i giochi
@@ -816,11 +1214,6 @@ class AudioMixerApp(ctk.CTk):
         """Ferma la riproduzione di una clip"""
         if clip_name in self.mixer.clips:
             self.mixer.clips[clip_name].stop()
-            
-            # Aggiorna bottone nel mixer se esiste
-            if hasattr(self, 'mixer_clip_buttons') and clip_name in self.mixer_clip_buttons:
-                btn = self.mixer_clip_buttons[clip_name]
-                btn.configure(text="▶", fg_color=COLORS["success"], hover_color="#059669")
     
     def remove_clip(self, clip_name: str):
         """Rimuove una clip e elimina il file se è nella cartella clips/"""
@@ -2232,66 +2625,39 @@ class AudioMixerApp(ctk.CTk):
         for clip_name, clip in sorted(self.mixer.clips.items()):
             clip_frame = ctk.CTkFrame(
                 self.mixer_clips_container,
-                fg_color=COLORS["bg_card"],
-                corner_radius=8,
-                height=45
+                fg_color=COLORS["bg"],
+                corner_radius=8
             )
-            clip_frame.pack(fill="x", pady=2, padx=5)
-            clip_frame.pack_propagate(False)  # Mantiene altezza fissa
+            clip_frame.pack(fill="x", pady=3, padx=5)
             
-            # Grid layout per allineamento perfetto
-            clip_frame.grid_columnconfigure(0, weight=1)
-            clip_frame.grid_columnconfigure(1, weight=0)
-            
-            # Nome clip (troncato se troppo lungo)
-            display_name = clip_name if len(clip_name) <= 35 else clip_name[:32] + "..."
+            # Nome clip
             name_label = ctk.CTkLabel(
                 clip_frame,
-                text=display_name,
+                text=clip_name,
                 text_color=COLORS["text"],
-                font=ctk.CTkFont(size=11),
+                font=ctk.CTkFont(size=12),
                 anchor="w"
             )
-            name_label.grid(row=0, column=0, padx=(12, 5), pady=0, sticky="w")
+            name_label.pack(side="left", padx=10, pady=5, fill="x", expand=True)
             
-            # Bottone play/pause
+            # Bottone play
             play_btn = ctk.CTkButton(
                 clip_frame,
                 text="▶",
-                width=50,
-                height=35,
-                fg_color=COLORS["success"],
-                hover_color="#059669",
-                font=ctk.CTkFont(size=14, weight="bold"),
-                command=lambda name=clip_name, btn=None: self.toggle_clip_from_mixer(name),
-                corner_radius=8
+                width=40,
+                height=30,
+                fg_color=COLORS["accent"],
+                hover_color=COLORS["accent_hover"],
+                command=lambda name=clip_name: self.play_clip_from_mixer(name)
             )
-            play_btn.grid(row=0, column=1, padx=(5, 8), pady=5, sticky="e")
-            
-            # Salva riferimento al bottone per aggiornare lo stato
-            if not hasattr(self, 'mixer_clip_buttons'):
-                self.mixer_clip_buttons = {}
-            self.mixer_clip_buttons[clip_name] = play_btn
+            play_btn.pack(side="right", padx=5, pady=5)
     
-    def toggle_clip_from_mixer(self, clip_name: str):
-        """Toggle play/pause di una clip dal mixer"""
-        if clip_name not in self.mixer.clips:
-            return
-        
-        clip = self.mixer.clips[clip_name]
-        btn = self.mixer_clip_buttons.get(clip_name)
-        
-        if clip.is_playing:
-            # Ferma
-            clip.stop()
-            if btn:
-                btn.configure(text="▶", fg_color=COLORS["success"], hover_color="#059669")
-        else:
-            # Avvia
+    def play_clip_from_mixer(self, clip_name: str):
+        """Riproduce una clip dal mixer (senza controllo pagina)"""
+        if clip_name in self.mixer.clips:
+            clip = self.mixer.clips[clip_name]
             clip.is_looping = False
             clip.play()
-            if btn:
-                btn.configure(text="⏸", fg_color=COLORS["warning"], hover_color="#d97706")
     
     def on_bus_fader_change(self, bus_name, value):
         """Callback fader bus"""
@@ -2319,9 +2685,6 @@ class AudioMixerApp(ctk.CTk):
             if channel_id in self.mixer_channel_strips:
                 btn = self.mixer_channel_strips[channel_id].routing_buttons[bus_name]
                 btn.configure(fg_color=COLORS["accent"] if new_state else COLORS["bg_card"])
-            
-            # Salva configurazione
-            self.save_config()
     
     def toggle_channel_mute(self, channel_id):
         """Toggle mute canale"""
@@ -2919,53 +3282,6 @@ class AudioMixerApp(ctk.CTk):
         except Exception as e:
             messagebox.showerror("Errore", f"Impossibile aprire l'editor:\n{str(e)}")
     
-    def restore_promixer_config(self):
-        """Ripristina la configurazione del ProMixer dal file salvato"""
-        try:
-            config = self.load_config_dict()
-            mixer_config = config.get('pro_mixer', {})
-            
-            if not mixer_config:
-                print("   Nessuna configurazione ProMixer salvata")
-                return
-            
-            print("🔄 Ripristino configurazione ProMixer...")
-            
-            # Ripristina dispositivi input
-            input_devices = mixer_config.get('input_devices', {})
-            for channel_id, device_id in input_devices.items():
-                if channel_id in self.pro_mixer.channels:
-                    success = self.pro_mixer.start_input(channel_id, device_id)
-                    if success:
-                        print(f"   ✓ {channel_id} → Device {device_id}")
-            
-            # Ripristina dispositivi output
-            output_devices = mixer_config.get('output_devices', {})
-            for bus_name, device_id in output_devices.items():
-                if bus_name in self.pro_mixer.buses:
-                    self.pro_mixer.set_bus_device(bus_name, device_id)
-                    print(f"   ✓ Bus {bus_name} → Device {device_id}")
-            
-            # Ripristina routing
-            channel_routing = mixer_config.get('channel_routing', {})
-            for channel_id, routing in channel_routing.items():
-                if channel_id in self.pro_mixer.channels:
-                    for bus_name, level in routing.items():
-                        self.pro_mixer.set_channel_routing(channel_id, bus_name, level > 0)
-                        if level > 0:
-                            self.pro_mixer.channels[channel_id].routing[bus_name] = level
-            
-            # Ripristina fader (in dB)
-            channel_volumes = mixer_config.get('channel_volumes', {})
-            for channel_id, fader_db in channel_volumes.items():
-                if channel_id in self.pro_mixer.channels:
-                    self.pro_mixer.channels[channel_id].set_fader_db(fader_db)
-            
-            print("✓ Configurazione ProMixer ripristinata")
-            
-        except Exception as e:
-            print(f"⚠ Errore ripristino configurazione ProMixer: {e}")
-    
     def save_config(self):
         """Salva la configurazione corrente preservando i dispositivi audio"""
         try:
@@ -2990,37 +3306,9 @@ class AudioMixerApp(ctk.CTk):
                     }
                     config['clips'].append(clip_data)
             
-            # Salva configurazione ProMixer (dispositivi e routing)
-            if hasattr(self, 'pro_mixer') and self.pro_mixer:
-                mixer_config = {
-                    'input_devices': {},  # {channel_id: device_id}
-                    'output_devices': {},  # {bus_name: device_id}
-                    'channel_routing': {},  # {channel_id: {bus_name: level}}
-                    'channel_volumes': {}  # {channel_id: volume}
-                }
-                
-                # Salva dispositivi input (usa input_device_map)
-                mixer_config['input_devices'] = self.pro_mixer.input_device_map.copy()
-                
-                # Salva routing e fader
-                for channel_id, channel in self.pro_mixer.channels.items():
-                    # Salva routing
-                    mixer_config['channel_routing'][channel_id] = channel.routing.copy()
-                    # Salva fader (in dB)
-                    mixer_config['channel_volumes'][channel_id] = channel.fader
-                
-                # Salva dispositivi output
-                for bus_name, bus in self.pro_mixer.buses.items():
-                    if bus.device_id is not None:
-                        mixer_config['output_devices'][bus_name] = bus.device_id
-                
-                config['pro_mixer'] = mixer_config
-            
             # Salva nel file JSON (preservando audio_output_device e secondary_output_device)
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=2, ensure_ascii=False)
-            
-            print(f"✓ Configurazione salvata (ProMixer incluso)")
                 
         except Exception as e:
             print(f"Errore nel salvataggio configurazione: {e}")
@@ -3204,7 +3492,239 @@ class AudioMixerApp(ctk.CTk):
         self.update_mixer_clips_list()
 
 
-# ===== ENTRY POINT =====
+class MixerConfigWindow(ctk.CTkToplevel):
+    """Finestra configurazione dispositivi mixer"""
+    
+    def __init__(self, parent, pro_mixer, channel_strips, bus_strips):
+        super().__init__(parent)
+        
+        self.pro_mixer = pro_mixer
+        self.parent = parent
+        self.channel_strips = channel_strips
+        self.bus_strips = bus_strips
+        
+        self.title("⚙️ Configurazione Mixer")
+        self.geometry("900x700")
+        self.configure(fg_color=COLORS["bg_primary"])
+        
+        # Imposta finestra sempre in primo piano
+        self.attributes('-topmost', True)
+        self.lift()
+        self.focus_force()
+        
+        # Get devices
+        self.devices = pro_mixer.get_available_devices()
+        
+        # Dizionari per salvare i dropdown
+        self.input_dropdowns = {}
+        self.output_dropdowns = {}
+        
+        self.setup_ui()
+    
+    def setup_ui(self):
+        """Crea UI configurazione"""
+        # Title
+        title = ctk.CTkLabel(
+            self,
+            text="⚙️ Configurazione Routing Audio",
+            font=ctk.CTkFont(size=22, weight="bold"),
+            text_color=COLORS["accent"]
+        )
+        title.pack(pady=20)
+        
+        # Scroll frame
+        scroll = ctk.CTkScrollableFrame(self, fg_color=COLORS["bg_secondary"])
+        scroll.pack(fill="both", expand=True, padx=20, pady=10)
+        
+        # Hardware Inputs
+        hw_label = ctk.CTkLabel(
+            scroll,
+            text="🎤 HARDWARE INPUTS",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLORS["text"]
+        )
+        hw_label.pack(pady=(10, 5), anchor="w", padx=20)
+        
+        for i in range(1, 4):
+            self.create_input_config(scroll, f"HW{i}", f"Hardware {i}")
+        
+        # Virtual Inputs
+        virt_label = ctk.CTkLabel(
+            scroll,
+            text="🔌 VIRTUAL INPUTS",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLORS["text"]
+        )
+        virt_label.pack(pady=(20, 5), anchor="w", padx=20)
+        
+        for i in range(1, 3):
+            self.create_input_config(scroll, f"VIRT{i}", f"Virtual {i}")
+        
+        # Output Buses
+        bus_label = ctk.CTkLabel(
+            scroll,
+            text="🔊 OUTPUT BUSES",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLORS["accent"]
+        )
+        bus_label.pack(pady=(20, 5), anchor="w", padx=20)
+        
+        for bus_name in ['A1', 'A2', 'A3', 'B1', 'B2']:
+            self.create_output_config(scroll, bus_name)
+        
+        # Close button
+        close_btn = ctk.CTkButton(
+            self,
+            text="✓ Chiudi",
+            width=200,
+            height=40,
+            command=self.destroy,
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        close_btn.pack(pady=20)
+    
+    def create_input_config(self, parent, channel_id, label):
+        """Crea configurazione per input"""
+        frame = ctk.CTkFrame(parent, fg_color=COLORS["bg_card"], corner_radius=8)
+        frame.pack(fill="x", pady=5, padx=20)
+        
+        label_widget = ctk.CTkLabel(
+            frame,
+            text=label,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=COLORS["text"],
+            width=120,
+            anchor="w"
+        )
+        label_widget.pack(side="left", padx=15, pady=12)
+        
+        # Device dropdown
+        input_devices = [f"[{d.id}] {d.name}" for d in self.devices if d.input_channels > 0]
+        
+        dropdown = ctk.CTkOptionMenu(
+            frame,
+            values=["None"] + input_devices,
+            width=550,
+            fg_color=COLORS["bg_secondary"],
+            button_color=COLORS["accent"],
+            button_hover_color=COLORS["accent_hover"],
+            dropdown_fg_color=COLORS["bg_card"],
+            command=lambda val, ch=channel_id: self.assign_input(ch, val)
+        )
+        dropdown.pack(side="right", padx=15, pady=12)
+    
+    def create_output_config(self, parent, bus_name):
+        """Crea configurazione per output bus"""
+        frame = ctk.CTkFrame(parent, fg_color=COLORS["bg_card"], corner_radius=8, border_width=1, border_color=COLORS["accent"])
+        frame.pack(fill="x", pady=5, padx=20)
+        
+        label_widget = ctk.CTkLabel(
+            frame,
+            text=f"Bus {bus_name}",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=COLORS["accent"],
+            width=120,
+            anchor="w"
+        )
+        label_widget.pack(side="left", padx=15, pady=12)
+        
+        # Device dropdown
+        output_devices = [f"[{d.id}] {d.name}" for d in self.devices if d.output_channels > 0]
+        
+        dropdown = ctk.CTkOptionMenu(
+            frame,
+            values=["None"] + output_devices,
+            width=550,
+            fg_color=COLORS["bg_secondary"],
+            button_color=COLORS["accent"],
+            button_hover_color=COLORS["accent_hover"],
+            dropdown_fg_color=COLORS["bg_card"],
+            command=lambda val, b=bus_name: self.assign_output(b, val)
+        )
+        dropdown.pack(side="right", padx=15, pady=12)
+        
+        # Salva riferimento al dropdown
+        self.output_dropdowns[bus_name] = dropdown
+        
+        # 🎯 Imposta valore iniziale se il bus ha già un device configurato
+        bus = self.pro_mixer.buses.get(bus_name)
+        if bus and bus.device_id is not None:
+            # Trova il device nella lista
+            for device in self.devices:
+                if device.id == bus.device_id and device.output_channels > 0:
+                    device_str = f"[{device.id}] {device.name}"
+                    dropdown.set(device_str)
+                    print(f"✓ Bus {bus_name} preconfigurato: Device {bus.device_id} ({device.name})")
+                    break
+    
+    def assign_input(self, channel_id, device_str):
+        """Assegna device a input"""
+        if device_str == "None":
+            return
+        
+        try:
+            # Estrai ID
+            device_id = int(device_str.split("]")[0].replace("[", ""))
+            
+            # Avvia input
+            success = self.pro_mixer.start_input(channel_id, device_id)
+            
+            if success:
+                messagebox.showinfo("✓ Configurato", f"{channel_id} collegato al dispositivo {device_id}")
+            else:
+                messagebox.showerror("✗ Errore", "Impossibile avviare input")
+        except Exception as e:
+            messagebox.showerror("Errore", str(e))
+    
+    def assign_output(self, bus_name, device_str):
+        """Assegna device a bus"""
+        if device_str == "None":
+            return
+        
+        try:
+            # Estrai ID
+            device_id = int(device_str.split("]")[0].replace("[", ""))
+            
+            # Assegna
+            self.pro_mixer.set_bus_device(bus_name, device_id)
+            
+            # Aggiorna label nella UI
+            if bus_name in self.bus_strips:
+                strip = self.bus_strips[bus_name]
+                device = next((d for d in self.devices if d.id == device_id), None)
+                if device:
+                    strip.device_label.configure(text=device.name[:25])
+            
+            # 🎯 SINCRONIZZAZIONE CON SOUNDBOARD
+            # Se si configura A1 o A2, aggiorna anche la soundboard
+            if bus_name == 'A1':
+                print(f"🔄 Sincronizzazione Bus A1 → Soundboard Primary Output")
+                self.parent.mixer.output_device = device_id
+                # Salva nel config
+                config = self.parent.load_config_dict()
+                config['audio_output_device'] = device_id
+                with open(self.parent.config_file, 'w', encoding='utf-8') as f:
+                    json.dump(config, f, indent=2, ensure_ascii=False)
+                print(f"   ✓ Primary Output aggiornato a device {device_id}")
+            
+            elif bus_name == 'A2':
+                print(f"🔄 Sincronizzazione Bus A2 → Soundboard Secondary Output")
+                self.parent.mixer.secondary_output_device = device_id
+                # Salva nel config
+                config = self.parent.load_config_dict()
+                config['secondary_output_device'] = device_id
+                with open(self.parent.config_file, 'w', encoding='utf-8') as f:
+                    json.dump(config, f, indent=2, ensure_ascii=False)
+                print(f"   ✓ Secondary Output aggiornato a device {device_id}")
+            
+            msg = f"Bus {bus_name} → Device {device_id}\n\nRicorda di avviare il mixer!"
+            if bus_name in ['A1', 'A2']:
+                msg += f"\n\n🎯 Soundboard sincronizzata automaticamente!"
+            
+            messagebox.showinfo("✓ Configurato", msg)
+        except Exception as e:
+            messagebox.showerror("Errore", str(e))
+
 
 if __name__ == "__main__":
     app = AudioMixerApp()

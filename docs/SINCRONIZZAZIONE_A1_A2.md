@@ -70,13 +70,20 @@ La sincronizzazione è **bidirezionale**:
 ### Audio → Mixer
 Quando applichi configurazione dal tab **🔊 Audio**:
 ```python
-# Soundboard
-mixer.output_device = A1_device_id
-mixer.secondary_output_device = A2_device_id
+# ProMixer: Ferma stream esistenti
+bus_a1.stream.stop() if bus_a1.stream else None
+bus_a2.stream.stop() if bus_a2.stream else None
 
-# ProMixer automaticamente sincronizzato
+# Riconfigura bus con nuovi device
 pro_mixer.buses['A1'].device_id = A1_device_id
 pro_mixer.buses['A2'].device_id = A2_device_id
+
+# Riavvia stream (se mixer attivo)
+pro_mixer.start_output('A1')
+pro_mixer.start_output('A2')
+
+# Note: Soundboard invia audio al ProMixer tramite virtual_output_callback
+# NON usa più output_device direttamente
 ```
 
 ### Mixer → Audio
