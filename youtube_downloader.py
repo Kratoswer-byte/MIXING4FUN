@@ -1,13 +1,17 @@
 """
-YouTube Downloader Module - Gestisce il download e la conversione di clip da YouTube
+YouTube Downloader Module - Sistema completo integrato per scaricare e tagliare clip
+con anteprima waveform e selezione visuale
 """
 import customtkinter as ctk
-from tkinter import messagebox
+from tkinter import messagebox, Canvas
 import os
 import tempfile
 import soundfile as sf
+import sounddevice as sd
 import numpy as np
 from threading import Thread
+import time
+import subprocess
 
 try:
     import yt_dlp
@@ -17,7 +21,7 @@ except ImportError:
 
 
 class YouTubeDownloader:
-    """Gestisce il download da YouTube"""
+    """Gestisce il download da YouTube con anteprima e taglio integrati"""
     
     def __init__(self, parent, on_download_complete, colors, clips_folder=None):
         self.parent = parent
@@ -25,398 +29,741 @@ class YouTubeDownloader:
         self.colors = colors
         self.is_downloading = False
         self.clips_folder = clips_folder or os.path.join(os.path.dirname(__file__), "clips")
+        
+        # Stato audio
+        self.audio_data = None
+        self.sample_rate = None
+        self.duration = 0
+        self.temp_file = None
+        self.video_title = ""
+        
+        # Playback
+        self.is_playing = False
+        self.playback_thread = None
+        self.playback_position = 0  # Posizione corrente durante playback
+        self.playback_update_job = None  # Job per update progressione
+        
+        # Selezione
+        self.start_time = 0
+        self.end_time = 0
+        
+        # UI elements
+        self.url_entry = None
+        self.download_btn = None
     
-    def parse_timestamp(self, timestamp_str):
-        """Converte timestamp in formato m:s:ms o s:ms o s in secondi decimali
-        
-        Formati supportati:
-        - "10" = 10 secondi
-        - "45.2" = 45.2 secondi (con decimali)
-        - "1:30" = 1 minuto e 30 secondi (90s)
-        - "45:200" = 45 secondi e 200 millisecondi (45.2s) - se >59 è millisecondi
-        - "1:40:500" = 1 minuto, 40 secondi, 500 millisecondi (100.5s)
-        """
-        if not timestamp_str or timestamp_str.strip() == "":
-            return None
-        
-        timestamp_str = timestamp_str.strip()
-        parts = timestamp_str.split(':')
-        
+    def _format_time(self, seconds):
+        """Formatta secondi in formato mm:ss.ms"""
+        mins = int(seconds // 60)
+        secs = seconds % 60
+        return f"{mins}:{secs:05.2f}"
+    
+    def _parse_time(self, time_str):
+        """Converte mm:ss.ms o secondi in secondi"""
         try:
-            if len(parts) == 1:
-                # Solo secondi: "10" o "10.5"
-                return float(parts[0])
-            elif len(parts) == 2:
-                # Può essere mm:ss o ss:ms
-                first = int(parts[0])
-                second_str = parts[1]
-                second = int(second_str)
-                
-                # Se il secondo valore è > 59, è millisecondi, altrimenti secondi
-                if second >= 60 or len(second_str) >= 3:
-                    # ss:ms (millisecondi)
-                    ms = second
-                    # Normalizza millisecondi a 3 cifre
-                    if len(second_str) == 1:
-                        ms *= 100  # 5 -> 500ms
-                    elif len(second_str) == 2:
-                        ms *= 10   # 50 -> 500ms
-                    return first + (ms / 1000.0)
-                else:
-                    # mm:ss (minuti:secondi)
-                    return first * 60 + second
-            elif len(parts) == 3:
-                # mm:ss:ms
-                minutes = int(parts[0])
-                seconds = int(parts[1])
-                ms_str = parts[2]
-                
-                # Normalizza millisecondi
-                ms = int(ms_str)
-                if len(ms_str) == 1:
-                    ms *= 100
-                elif len(ms_str) == 2:
-                    ms *= 10
-                
-                return minutes * 60 + seconds + (ms / 1000.0)
+            if ':' in time_str:
+                parts = time_str.split(':')
+                mins = int(parts[0])
+                secs = float(parts[1])
+                return mins * 60 + secs
             else:
-                raise ValueError("Formato non valido")
-        except ValueError:
-            raise ValueError(f"Formato timestamp non valido: '{timestamp_str}'\nUsa: 10 | 1:30 | 45:200 | 1:40:500")
+                return float(time_str)
+        except:
+            return 0
+        self.progress_label = None
+        self.waveform_canvas = None
+        self.preview_container = None
+        self.start_entry = None
+        self.end_entry = None
+        self.duration_label = None
+        self.play_btn = None
+        self.filename_entry = None
     
     def create_youtube_tab(self, tab):
-        """Crea l'interfaccia della tab YouTube"""
-        frame = ctk.CTkScrollableFrame(tab, fg_color="transparent")
-        frame.pack(pady=20, padx=20, fill="both", expand=True)
+        """Crea l'interfaccia completa nella tab YouTube"""
+        main_frame = ctk.CTkScrollableFrame(tab, fg_color="transparent")
+        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
         
-        # Title
-        title = ctk.CTkLabel(
-            frame,
-            text="📥 Scarica Audio da YouTube",
-            font=ctk.CTkFont(size=24, weight="bold")
+        # Header
+        header = ctk.CTkLabel(
+            main_frame,
+            text="🎬 Download & Taglia Clip da YouTube",
+            font=ctk.CTkFont(size=24, weight="bold"),
+            text_color=self.colors["accent"]
         )
-        title.pack(pady=(0, 20))
+        header.pack(pady=(0, 20))
+        
+        # Sezione Download
+        download_frame = ctk.CTkFrame(main_frame, fg_color=self.colors["bg_card"], corner_radius=10)
+        download_frame.pack(fill="x", pady=10)
+        
+        ctk.CTkLabel(
+            download_frame,
+            text="📥 Download Video",
+            font=ctk.CTkFont(size=16, weight="bold")
+        ).pack(pady=(15, 10), padx=15, anchor="w")
         
         if not YT_DLP_AVAILABLE:
-            warning = ctk.CTkLabel(
-                frame,
-                text="⚠️ yt-dlp non installato!\nEsegui: pip install yt-dlp",
-                font=ctk.CTkFont(size=14),
-                text_color="#ff6b6b"
-            )
-            warning.pack(pady=20)
+            ctk.CTkLabel(
+                download_frame,
+                text="⚠️ yt-dlp non installato! Installa con: pip install yt-dlp",
+                text_color=self.colors["danger"],
+                font=ctk.CTkFont(size=12)
+            ).pack(padx=15, pady=10)
         
-        # URL Input
+        # URL input
+        url_container = ctk.CTkFrame(download_frame, fg_color="transparent")
+        url_container.pack(fill="x", padx=15, pady=10)
+        
         ctk.CTkLabel(
-            frame,
-            text="🔗 URL Video YouTube:",
-            font=ctk.CTkFont(size=14, weight="bold")
-        ).pack(anchor="w", pady=(10, 5))
+            url_container,
+            text="URL:",
+            font=ctk.CTkFont(size=12, weight="bold")
+        ).pack(side="left", padx=(0, 10))
         
         self.url_entry = ctk.CTkEntry(
-            frame,
+            url_container,
             placeholder_text="https://www.youtube.com/watch?v=...",
-            width=600,
             height=40,
-            font=ctk.CTkFont(size=13)
-        )
-        self.url_entry.pack(pady=(0, 20), fill="x")
-        
-        # Time controls
-        time_frame = ctk.CTkFrame(frame, fg_color=self.colors["bg_card"])
-        time_frame.pack(pady=10, fill="x", padx=20)
-        
-        ctk.CTkLabel(
-            time_frame,
-            text="⏱️ Taglia Automaticamente (opzionale)",
-            font=ctk.CTkFont(size=14, weight="bold")
-        ).grid(row=0, column=0, columnspan=4, pady=10)
-        
-        # Start time
-        ctk.CTkLabel(time_frame, text="Inizio:").grid(row=1, column=0, padx=10, pady=10)
-        self.yt_start_entry = ctk.CTkEntry(time_frame, placeholder_text="0 o 1:30", width=120)
-        self.yt_start_entry.grid(row=1, column=1, padx=10, pady=10)
-        
-        # End time
-        ctk.CTkLabel(time_frame, text="Fine:").grid(row=1, column=2, padx=10, pady=10)
-        self.yt_end_entry = ctk.CTkEntry(time_frame, placeholder_text="5 o 1:40:50", width=120)
-        self.yt_end_entry.grid(row=1, column=3, padx=10, pady=10)
-        
-        # Legenda formati
-        ctk.CTkLabel(
-            time_frame,
-            text="💡 Formati: 10 (sec) | 1:30 (min:sec) | 45:200 (sec:ms) | 1:40:500 (min:sec:ms)",
-            font=ctk.CTkFont(size=11),
-            text_color=self.colors["text_secondary"]
-        ).grid(row=2, column=0, columnspan=4, pady=(0, 10))
-        
-        # Quick select
-        quick_frame = ctk.CTkFrame(time_frame, fg_color="transparent")
-        quick_frame.grid(row=3, column=0, columnspan=4, pady=10)
-        
-        ctk.CTkLabel(quick_frame, text="Quick:").pack(side="left", padx=5)
-        
-        for text, duration in [("3 sec", 3), ("5 sec", 5), ("10 sec", 10), ("30 sec", 30)]:
-            ctk.CTkButton(
-                quick_frame,
-                text=text,
-                command=lambda d=duration: self.quick_select(d),
-                width=70,
-                height=25,
-                fg_color=self.colors["bg_card"]
-            ).pack(side="left", padx=5)
-        
-        # Format selection
-        format_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        format_frame.pack(pady=10)
-        
-        ctk.CTkLabel(
-            format_frame,
-            text="🎵 Formato Output:",
-            font=ctk.CTkFont(size=12)
-        ).pack(side="left", padx=10)
-        
-        self.format_var = ctk.StringVar(value="wav")
-        formats = [("WAV", "wav"), ("MP3", "mp3")]
-        
-        for text, value in formats:
-            ctk.CTkRadioButton(
-                format_frame,
-                text=text,
-                variable=self.format_var,
-                value=value
-            ).pack(side="left", padx=10)
-        
-        # Progress
-        self.yt_progress = ctk.CTkProgressBar(frame, width=600)
-        self.yt_progress.pack(pady=20, fill="x", padx=50)
-        self.yt_progress.set(0)
-        
-        self.yt_status = ctk.CTkLabel(
-            frame,
-            text="Pronto per scaricare",
             font=ctk.CTkFont(size=12)
         )
-        self.yt_status.pack(pady=10)
+        self.url_entry.pack(side="left", fill="x", expand=True)
         
         # Download button
         self.download_btn = ctk.CTkButton(
-            frame,
-            text="📥 Scarica e Aggiungi alla Soundboard",
-            command=self.download_youtube,
-            height=50,
-            font=ctk.CTkFont(size=16, weight="bold"),
+            download_frame,
+            text="📥 Scarica & Mostra Waveform",
+            command=self.download_and_preview,
+            height=45,
             fg_color=self.colors["accent"],
-            hover_color=self.colors["accent_hover"]
+            hover_color=self.colors["accent_hover"],
+            font=ctk.CTkFont(size=14, weight="bold")
         )
-        self.download_btn.pack(pady=20)
+        self.download_btn.pack(pady=15, padx=50, fill="x")
         
-        # Info
-        info_text = """
-💡 COME FUNZIONA:
-1. Incolla l'URL di un video YouTube
-2. (Opzionale) Imposta inizio e fine per tagliare
-3. Clicca "Scarica e Aggiungi"
-4. La clip viene scaricata e aggiunta automaticamente alla soundboard!
-5. Vai nella tab Soundboard per assegnare il tasto rapido
-
-⚡ TIPS:
-- Lascia vuoti inizio/fine per scaricare tutto l'audio
-- Usa i pulsanti "Quick" per selezioni rapide
-- Il formato WAV ha qualità migliore ma file più grandi
-        """
+        # Progress
+        self.progress_label = ctk.CTkLabel(
+            download_frame,
+            text="",
+            font=ctk.CTkFont(size=11),
+            text_color=self.colors["text_muted"]
+        )
+        self.progress_label.pack(pady=(0, 15))
+        
+        # Sezione Preview (nascosta inizialmente)
+        self.preview_container = ctk.CTkFrame(main_frame, fg_color=self.colors["bg_card"], corner_radius=10)
+        # Non pack ancora
+        
+        self._create_preview_section()
+    
+    def _create_preview_section(self):
+        """Crea sezione preview e taglio"""
+        ctk.CTkLabel(
+            self.preview_container,
+            text="✂️ Taglia & Anteprima",
+            font=ctk.CTkFont(size=16, weight="bold")
+        ).pack(pady=(15, 5), padx=15, anchor="w")
+        
+        # Durata totale
+        self.duration_label = ctk.CTkLabel(
+            self.preview_container,
+            text="Durata: 0:00",
+            font=ctk.CTkFont(size=12),
+            text_color=self.colors["text_muted"]
+        )
+        self.duration_label.pack(pady=5)
+        
+        # Waveform
+        waveform_label = ctk.CTkLabel(
+            self.preview_container,
+            text="🎵 Forma d'onda (clicca per impostare inizio/fine):",
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        waveform_label.pack(pady=(10, 5), padx=15, anchor="w")
+        
+        canvas_container = ctk.CTkFrame(self.preview_container, fg_color=self.colors["bg_primary"], corner_radius=5)
+        canvas_container.pack(fill="x", padx=15, pady=5)
+        
+        self.waveform_canvas = Canvas(
+            canvas_container,
+            height=120,
+            bg=self.colors["bg_primary"],
+            highlightthickness=1,
+            highlightbackground=self.colors["border"]
+        )
+        self.waveform_canvas.pack(fill="x", padx=5, pady=5)
+        self.waveform_canvas.bind("<Button-1>", self._on_waveform_click)
+        self.waveform_canvas.bind("<B1-Motion>", self._on_waveform_drag)
+        
+        # Controlli tempo
+        time_container = ctk.CTkFrame(self.preview_container, fg_color="transparent")
+        time_container.pack(fill="x", padx=15, pady=15)
+        
+        # Inizio
+        left_col = ctk.CTkFrame(time_container, fg_color="transparent")
+        left_col.pack(side="left", fill="x", expand=True, padx=5)
         
         ctk.CTkLabel(
-            frame,
-            text=info_text,
-            font=ctk.CTkFont(size=11),
-            text_color="#aaa",
-            justify="left"
-        ).pack(pady=20, padx=20)
-    
-    def quick_select(self, duration):
-        """Imposta rapidamente la durata"""
-        self.yt_start_entry.delete(0, 'end')
-        self.yt_start_entry.insert(0, "0")
-        self.yt_end_entry.delete(0, 'end')
-        self.yt_end_entry.insert(0, str(duration))
-    
-    def download_youtube(self):
-        """Avvia il download da YouTube"""
-        if not YT_DLP_AVAILABLE:
-            messagebox.showerror("Errore", "yt-dlp non installato!\nEsegui: pip install yt-dlp")
-            return
+            left_col,
+            text="▶️ Inizio (mm:ss):",
+            font=ctk.CTkFont(size=12, weight="bold")
+        ).pack(anchor="w")
         
+        self.start_entry = ctk.CTkEntry(
+            left_col,
+            placeholder_text="0:00",
+            height=40,
+            font=ctk.CTkFont(size=13)
+        )
+        self.start_entry.pack(fill="x", pady=5)
+        self.start_entry.bind("<KeyRelease>", lambda e: self._update_from_entries())
+        
+        # Fine
+        right_col = ctk.CTkFrame(time_container, fg_color="transparent")
+        right_col.pack(side="left", fill="x", expand=True, padx=5)
+        
+        ctk.CTkLabel(
+            right_col,
+            text="⏸️ Fine (mm:ss):",
+            font=ctk.CTkFont(size=12, weight="bold")
+        ).pack(anchor="w")
+        
+        self.end_entry = ctk.CTkEntry(
+            right_col,
+            placeholder_text="Fine",
+            height=40,
+            font=ctk.CTkFont(size=13)
+        )
+        self.end_entry.pack(fill="x", pady=5)
+        self.end_entry.bind("<KeyRelease>", lambda e: self._update_from_entries())
+        
+        # Info durata selezione
+        self.selection_info = ctk.CTkLabel(
+            self.preview_container,
+            text="Selezione: 0.00s",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=self.colors["accent"]
+        )
+        self.selection_info.pack(pady=5)
+        
+        # Controlli playback
+        playback_container = ctk.CTkFrame(self.preview_container, fg_color="transparent")
+        playback_container.pack(pady=15)
+        
+        self.play_btn = ctk.CTkButton(
+            playback_container,
+            text="▶️ Ascolta Selezione",
+            command=self._toggle_playback,
+            width=180,
+            height=45,
+            fg_color=self.colors["success"],
+            font=ctk.CTkFont(size=13, weight="bold")
+        )
+        self.play_btn.pack(side="left", padx=5)
+        
+        ctk.CTkButton(
+            playback_container,
+            text="⏹️ Stop",
+            command=self._stop_playback,
+            width=100,
+            height=45,
+            fg_color=self.colors["danger"]
+        ).pack(side="left", padx=5)
+        
+        ctk.CTkButton(
+            playback_container,
+            text="↩️ Reset",
+            command=self._reset_selection,
+            width=100,
+            height=45,
+            fg_color=self.colors["text_muted"]
+        ).pack(side="left", padx=5)
+        
+        # Nome file
+        name_container = ctk.CTkFrame(self.preview_container, fg_color="transparent")
+        name_container.pack(fill="x", padx=15, pady=15)
+        
+        ctk.CTkLabel(
+            name_container,
+            text="📝 Nome file:",
+            font=ctk.CTkFont(size=12, weight="bold")
+        ).pack(side="left", padx=(0, 10))
+        
+        self.filename_entry = ctk.CTkEntry(
+            name_container,
+            placeholder_text="nome_clip.mp3",
+            height=40,
+            font=ctk.CTkFont(size=12)
+        )
+        self.filename_entry.pack(side="left", fill="x", expand=True)
+        
+        # Pulsante salva
+        ctk.CTkButton(
+            self.preview_container,
+            text="💾 Salva Clip",
+            command=self._save_clip,
+            height=50,
+            fg_color=self.colors["accent"],
+            hover_color=self.colors["accent_hover"],
+            font=ctk.CTkFont(size=16, weight="bold")
+        ).pack(pady=20, padx=50, fill="x")
+    
+    def download_and_preview(self):
+        """Download audio e mostra preview"""
         url = self.url_entry.get().strip()
+        
         if not url:
-            messagebox.showerror("Errore", "Inserisci un URL di YouTube!")
+            messagebox.showerror("Errore", "Inserisci un URL YouTube")
             return
         
-        if self.is_downloading:
-            messagebox.showwarning("Download", "Download già in corso!")
+        if not YT_DLP_AVAILABLE:
+            messagebox.showerror("Errore", "yt-dlp non installato!\n\nInstalla con: pip install yt-dlp")
             return
         
-        # Avvia download in thread separato
+        self.download_btn.configure(state="disabled", text="⏳ Download...")
         thread = Thread(target=self._download_thread, args=(url,), daemon=True)
         thread.start()
     
     def _download_thread(self, url):
-        """Thread per il download da YouTube"""
-        self.is_downloading = True
-        self.download_btn.configure(state="disabled", text="⏳ Download in corso...")
-        
+        """Thread per download"""
         try:
-            # Ottieni parametri di taglio
-            start_time = self.yt_start_entry.get().strip()
-            end_time = self.yt_end_entry.get().strip()
+            self.progress_label.configure(text="📥 Download video...")
             
-            # Parse timestamp con supporto formati multipli
-            try:
-                start_sec = self.parse_timestamp(start_time)
-                end_sec = self.parse_timestamp(end_time)
-            except ValueError as e:
-                messagebox.showerror("Errore Formato", str(e))
-                self.is_downloading = False
-                self.download_btn.configure(state="normal", text="📥 Scarica da YouTube")
-                return
-            
-            # Crea cartella clips se non esiste
-            os.makedirs(self.clips_folder, exist_ok=True)
-            
-            # File temporaneo per download
             temp_dir = tempfile.gettempdir()
-            temp_base = f"yt_mixing4fun_{os.getpid()}"
-            temp_file = os.path.join(temp_dir, temp_base)
-            
-            # Opzioni yt-dlp - scarica e converti con FFmpeg
-            output_format = self.format_var.get()
-            
-            postprocessor_opts = {
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': output_format,
-            }
-            
-            if start_sec is not None or end_sec is not None:
-                postprocessor_opts['preferredquality'] = '192'
-            
-            # Percorso FFmpeg
-            ffmpeg_path = os.path.join(os.path.dirname(__file__), 'ffmpeg-8.0.1-essentials_build', 'bin')
+            temp_path = os.path.join(temp_dir, f"yt_{int(time.time())}")
             
             ydl_opts = {
                 'format': 'bestaudio/best',
-                'outtmpl': temp_file + '.%(ext)s',
+                'outtmpl': temp_path,
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'wav',
+                }],
                 'quiet': True,
                 'no_warnings': True,
-                'progress_hooks': [self._yt_progress_hook],
-                'postprocessors': [postprocessor_opts],
-                'ffmpeg_location': ffmpeg_path,
             }
-            
-            # Scarica
-            self.yt_status.configure(text="📥 Scaricando da YouTube...")
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
-                video_title = info.get('title', 'audio')
-                video_title = "".join(c for c in video_title if c.isalnum() or c in (' ', '-', '_'))[:50].strip()
-                
-                # Trova il file scaricato
-                import glob
-                possible_files = glob.glob(os.path.join(temp_dir, f"{temp_base}*"))
-                
-                if not possible_files:
-                    raise Exception(f"File scaricato non trovato. Cercato: {temp_file}*")
-                
-                downloaded_file = possible_files[0]
-                self.yt_status.configure(text=f"✅ Scaricato: {os.path.basename(downloaded_file)}")
-                
-                # Determina il file finale
-                output_file = os.path.join(self.clips_folder, f"{video_title}.{output_format}")
-                
-                counter = 1
-                while os.path.exists(output_file):
-                    output_file = os.path.join(self.clips_folder, f"{video_title}_{counter}.{output_format}")
-                    counter += 1
-                
-                # Elaborazione basata sul formato e taglio
-                if (start_sec is not None or end_sec is not None) and output_format == 'wav':
-                    # WAV con taglio: usa soundfile
-                    self.yt_status.configure(text="✂️ Taglio clip...")
-                    audio_data, sample_rate = sf.read(downloaded_file, always_2d=True)
-                    
-                    start_sample = int(start_sec * sample_rate) if start_sec else 0
-                    end_sample = int(end_sec * sample_rate) if end_sec else len(audio_data)
-                    audio_data = audio_data[start_sample:end_sample]
-                    
-                    self.yt_status.configure(text="🎚️ Normalizzazione...")
-                    max_val = np.max(np.abs(audio_data))
-                    if max_val > 0:
-                        audio_data = audio_data / max_val * 0.95
-                    
-                    self.yt_status.configure(text=f"💾 Salvataggio...")
-                    sf.write(output_file, audio_data, sample_rate)
-                    
-                elif (start_sec is not None or end_sec is not None):
-                    # MP3 con taglio: usa FFmpeg
-                    self.yt_status.configure(text="✂️ Taglio con FFmpeg...")
-                    import subprocess
-                    
-                    # Percorso FFmpeg
-                    ffmpeg_exe = os.path.join(os.path.dirname(__file__), 'ffmpeg-8.0.1-essentials_build', 'bin', 'ffmpeg.exe')
-                    
-                    start_arg = ['-ss', str(start_sec)] if start_sec else []
-                    duration = end_sec - (start_sec or 0) if end_sec else None
-                    duration_arg = ['-t', str(duration)] if duration else []
-                    
-                    cmd = [ffmpeg_exe, '-i', downloaded_file] + start_arg + duration_arg + ['-acodec', 'copy', output_file, '-y']
-                    
-                    try:
-                        subprocess.run(cmd, capture_output=True, check=True)
-                    except subprocess.CalledProcessError:
-                        cmd = [ffmpeg_exe, '-i', downloaded_file] + start_arg + duration_arg + [output_file, '-y']
-                        subprocess.run(cmd, capture_output=True, check=True)
-                else:
-                    # Nessun taglio: copia diretta
-                    self.yt_status.configure(text=f"💾 Salvataggio...")
-                    import shutil
-                    shutil.copy2(downloaded_file, output_file)
-                
-                # Rimuovi file temporanei
-                try:
-                    import glob
-                    temp_files = glob.glob(os.path.join(temp_dir, f"{temp_base}*"))
-                    for tf in temp_files:
-                        try:
-                            if os.path.exists(tf):
-                                os.remove(tf)
-                        except:
-                            pass
-                except:
-                    pass
-                
-                # Notifica completamento
-                self.yt_status.configure(text="✅ Aggiunta alla soundboard...")
-                self.parent.after(100, lambda: self.on_download_complete(output_file))
-                
-                self.yt_progress.set(1.0)
-                self.yt_status.configure(text=f"✅ Download completato! File: {os.path.basename(output_file)}")
-                
-                self.parent.after(2000, lambda: self.yt_progress.set(0))
-                
+                self.video_title = info.get('title', 'audio')
+            
+            self.temp_file = temp_path + '.wav'
+            
+            self.progress_label.configure(text="📂 Caricamento audio...")
+            self.audio_data, self.sample_rate = sf.read(self.temp_file)
+            
+            # Converti a mono per waveform
+            if len(self.audio_data.shape) > 1:
+                audio_mono = np.mean(self.audio_data, axis=1)
+            else:
+                audio_mono = self.audio_data
+            
+            self.duration = len(self.audio_data) / self.sample_rate
+            
+            self.parent.after(0, lambda: self._on_download_complete(audio_mono))
+            
         except Exception as e:
-            self.yt_status.configure(text=f"❌ Errore: {str(e)}")
-            messagebox.showerror("Errore Download", f"Impossibile scaricare:\n{str(e)}")
-        
-        finally:
-            self.is_downloading = False
-            self.download_btn.configure(state="normal", text="📥 Scarica e Aggiungi alla Soundboard")
+            error_msg = str(e)
+            if "blocked it in your country" in error_msg or "not available" in error_msg.lower():
+                error_msg = "❌ Video non disponibile nella tua regione\n\nQuesto video è bloccato per copyright o geo-restrizioni."
+            elif "video unavailable" in error_msg.lower():
+                error_msg = "❌ Video non disponibile\n\nIl video potrebbe essere privato o rimosso."
+            else:
+                error_msg = f"Errore: {error_msg}"
+            
+            self.parent.after(0, lambda msg=error_msg: messagebox.showerror("Errore Download", msg))
+            self.parent.after(0, lambda: self.download_btn.configure(state="normal", text="📥 Scarica & Mostra Waveform"))
+            self.parent.after(0, lambda: self.progress_label.configure(text=""))
     
-    def _yt_progress_hook(self, d):
-        """Hook per aggiornare la progress bar"""
-        if d['status'] == 'downloading':
+    def _on_download_complete(self, audio_mono):
+        """Completamento download"""
+        self.download_btn.configure(state="normal", text="✓ Download Completato")
+        self.progress_label.configure(text=f"✓ {self.video_title}")
+        
+        # Mostra preview
+        self.preview_container.pack(fill="both", expand=True, pady=10)
+        
+        # Imposta valori
+        mins = int(self.duration // 60)
+        secs = int(self.duration % 60)
+        self.duration_label.configure(text=f"Durata totale: {mins}:{secs:02d} ({self.duration:.2f}s)")
+        
+        self.start_time = 0
+        self.end_time = self.duration
+        
+        self.start_entry.delete(0, 'end')
+        self.start_entry.insert(0, "0:00")
+        self.end_entry.delete(0, 'end')
+        self.end_entry.insert(0, self._format_time(self.duration))
+        
+        # Nome file
+        safe_title = "".join(c for c in self.video_title if c.isalnum() or c in (' ', '-', '_')).strip()
+        safe_title = safe_title[:50]  # Limita lunghezza
+        self.filename_entry.delete(0, 'end')
+        self.filename_entry.insert(0, f"{safe_title}.mp3")
+        
+        # Disegna waveform
+        self._draw_waveform(audio_mono)
+        self._update_selection_info()
+    
+    def _draw_waveform(self, audio_mono):
+        """Disegna waveform"""
+        self.waveform_canvas.delete("all")
+        
+        self.waveform_canvas.update_idletasks()
+        width = self.waveform_canvas.winfo_width()
+        if width <= 1:
+            width = 800
+        height = 120
+        
+        # Downsample
+        samples_per_pixel = max(1, len(audio_mono) // width)
+        downsampled = audio_mono[::samples_per_pixel]
+        
+        # Normalizza
+        max_val = np.max(np.abs(downsampled))
+        if max_val < 1e-10:
+            max_val = 1.0
+        normalized = downsampled / max_val
+        
+        # Disegna
+        center_y = height / 2
+        for i in range(len(normalized)):
+            x = (i / len(normalized)) * width
+            y_offset = normalized[i] * (height / 2 - 10)
+            
+            self.waveform_canvas.create_line(
+                x, center_y - y_offset,
+                x, center_y + y_offset,
+                fill=self.colors["accent"], width=1
+            )
+        
+        self._update_selection_overlay()
+    
+    def _update_selection_overlay(self):
+        """Aggiorna overlay selezione"""
+        self.waveform_canvas.delete("selection")
+        
+        width = self.waveform_canvas.winfo_width()
+        if width <= 1:
+            width = 800
+        height = 120
+        
+        if self.duration == 0:
+            return
+        
+        x_start = (self.start_time / self.duration) * width
+        x_end = (self.end_time / self.duration) * width
+        
+        # Area selezionata con pattern semi-trasparente
+        self.waveform_canvas.create_rectangle(
+            x_start, 0, x_end, height,
+            fill=self.colors["success"], stipple="gray25",
+            outline="", width=0, tags="selection"
+        )
+        
+        # Linee verticali per start e end
+        self.waveform_canvas.create_line(
+            x_start, 0, x_start, height,
+            fill=self.colors["success"], width=3, tags="selection"
+        )
+        self.waveform_canvas.create_line(
+            x_end, 0, x_end, height,
+            fill=self.colors["danger"], width=3, tags="selection"
+        )
+        
+        # Labels
+        self.waveform_canvas.create_text(
+            x_start, 10,
+            text=f"▶ {self._format_time(self.start_time)}",
+            fill=self.colors["success"],
+            font=("Arial", 10, "bold"),
+            anchor="nw", tags="selection"
+        )
+        self.waveform_canvas.create_text(
+            x_end, 10,
+            text=f"⏸ {self._format_time(self.end_time)}",
+            fill=self.colors["danger"],
+            font=("Arial", 10, "bold"),
+            anchor="ne", tags="selection"
+        )
+    
+    def _on_waveform_click(self, event):
+        """Click su waveform"""
+        if self.duration == 0:
+            return
+        
+        width = self.waveform_canvas.winfo_width()
+        ratio = event.x / width
+        click_time = max(0, min(ratio * self.duration, self.duration))
+        
+        # Se in riproduzione, sposta la posizione di playback (seek)
+        if self.is_playing:
+            self.playback_position = click_time
+            self.playback_start_time = time.time() - (click_time - self.start_time)
+            
+            # Ferma e riavvia da nuova posizione
             try:
-                percent_str = d.get('_percent_str', '0%').strip().replace('%', '')
-                percent = float(percent_str) / 100.0
-                self.yt_progress.set(percent)
+                sd.stop()
             except:
                 pass
+            
+            start_sample = int(click_time * self.sample_rate)
+            end_sample = int(self.end_time * self.sample_rate)
+            
+            if len(self.audio_data.shape) > 1:
+                segment = self.audio_data[start_sample:end_sample, :]
+            else:
+                segment = self.audio_data[start_sample:end_sample]
+            
+            def play():
+                try:
+                    sd.play(segment, self.sample_rate)
+                    sd.wait()
+                    self.parent.after(0, self._stop_playback)
+                except Exception as e:
+                    print(f"Errore playback: {e}")
+                    self.parent.after(0, self._stop_playback)
+            
+            self.playback_thread = Thread(target=play, daemon=True)
+            self.playback_thread.start()
+            return
+        
+        # Altrimenti, modifica selezione come prima
+        # Determina se settare start o end
+        dist_start = abs(click_time - self.start_time)
+        dist_end = abs(click_time - self.end_time)
+        
+        if dist_start < dist_end:
+            self.start_time = click_time
+            self.start_entry.delete(0, 'end')
+            self.start_entry.insert(0, self._format_time(click_time))
+        else:
+            self.end_time = click_time
+            self.end_entry.delete(0, 'end')
+            self.end_entry.insert(0, self._format_time(click_time))
+        
+        # Assicura start < end
+        if self.start_time >= self.end_time:
+            self.start_time, self.end_time = self.end_time, self.start_time
+            self.start_entry.delete(0, 'end')
+            self.start_entry.insert(0, self._format_time(self.start_time))
+            self.end_entry.delete(0, 'end')
+            self.end_entry.insert(0, self._format_time(self.end_time))
+        
+        self._update_selection_overlay()
+        self._update_selection_info()
+    
+    def _on_waveform_drag(self, event):
+        """Drag su waveform"""
+        self._on_waveform_click(event)
+    
+    def _update_from_entries(self):
+        """Aggiorna da input manuale"""
+        try:
+            start_val = self.start_entry.get().strip()
+            if start_val:
+                self.start_time = max(0, min(self._parse_time(start_val), self.duration))
+            
+            end_val = self.end_entry.get().strip()
+            if end_val:
+                self.end_time = max(0, min(self._parse_time(end_val), self.duration))
+            
+            if self.start_time >= self.end_time:
+                self.end_time = min(self.duration, self.start_time + 1)
+                self.end_entry.delete(0, 'end')
+                self.end_entry.insert(0, self._format_time(self.end_time))
+            
+            self._update_selection_overlay()
+            self._update_selection_info()
+        except ValueError:
+            pass
+    
+    def _update_selection_info(self):
+        """Aggiorna info selezione"""
+        duration = self.end_time - self.start_time
+        self.selection_info.configure(text=f"📏 Selezione: {self._format_time(duration)} ({self._format_time(self.start_time)} → {self._format_time(self.end_time)})")
+    
+    def _reset_selection(self):
+        """Reset selezione completa"""
+        self.start_time = 0
+        self.end_time = self.duration
+        self.start_entry.delete(0, 'end')
+        self.start_entry.insert(0, "0:00")
+        self.end_entry.delete(0, 'end')
+        self.end_entry.insert(0, self._format_time(self.duration))
+        self._update_selection_overlay()
+        self._update_selection_info()
+    
+    def _toggle_playback(self):
+        """Toggle playback"""
+        if self.is_playing:
+            self._stop_playback()
+        else:
+            self._start_playback()
+    
+    def _start_playback(self):
+        """Avvia playback"""
+        if self.audio_data is None:
+            return
+        
+        # Ferma qualsiasi playback in corso
+        try:
+            sd.stop()
+        except:
+            pass
+        
+        # Cancella update job precedente
+        if self.playback_update_job:
+            try:
+                self.parent.after_cancel(self.playback_update_job)
+            except:
+                pass
+        
+        self.is_playing = True
+        self.play_btn.configure(text="⏸️ In Riproduzione...")
+        self.playback_position = self.start_time
+        
+        start_sample = int(self.start_time * self.sample_rate)
+        end_sample = int(self.end_time * self.sample_rate)
+        
+        if len(self.audio_data.shape) > 1:
+            segment = self.audio_data[start_sample:end_sample, :]
+        else:
+            segment = self.audio_data[start_sample:end_sample]
+        
+        # Avvia aggiornamento progressione
+        self.playback_start_time = time.time()
+        self._update_playback_progress()
+        
+        def play():
+            try:
+                sd.play(segment, self.sample_rate)
+                sd.wait()
+                self.parent.after(0, self._stop_playback)
+            except Exception as e:
+                print(f"Errore playback: {e}")
+                self.parent.after(0, self._stop_playback)
+        
+        self.playback_thread = Thread(target=play, daemon=True)
+        self.playback_thread.start()
+    
+    def _update_playback_progress(self):
+        """Aggiorna linea di progressione durante playback"""
+        if not self.is_playing:
+            return
+        
+        # Calcola posizione corrente
+        elapsed = time.time() - self.playback_start_time
+        self.playback_position = self.start_time + elapsed
+        
+        if self.playback_position <= self.end_time:
+            # Disegna linea di progressione
+            self._draw_playback_line()
+            # Continua aggiornamento
+            self.playback_update_job = self.parent.after(50, self._update_playback_progress)
+        else:
+            self.playback_position = self.end_time
+    
+    def _draw_playback_line(self):
+        """Disegna linea di progressione sul canvas"""
+        self.waveform_canvas.delete("playback_line")
+        
+        width = self.waveform_canvas.winfo_width()
+        if width <= 1:
+            width = 800
+        height = 120
+        
+        if self.duration == 0:
+            return
+        
+        x_pos = (self.playback_position / self.duration) * width
+        
+        # Linea blu di progressione
+        self.waveform_canvas.create_line(
+            x_pos, 0, x_pos, height,
+            fill="#2196F3", width=2, tags="playback_line"
+        )
+    
+    def _stop_playback(self):
+        """Stop playback"""
+        self.is_playing = False
+        self.play_btn.configure(text="▶️ Ascolta Selezione")
+        
+        # Cancella update job
+        if self.playback_update_job:
+            try:
+                self.parent.after_cancel(self.playback_update_job)
+            except:
+                pass
+        
+        # Rimuovi linea di progressione
+        self.waveform_canvas.delete("playback_line")
+        
+        try:
+            sd.stop()
+        except Exception as e:
+            print(f"Errore stop playback: {e}")
+    
+    def _save_clip(self):
+        """Salva clip"""
+        if self.audio_data is None:
+            messagebox.showerror("Errore", "Nessun audio caricato")
+            return
+        
+        filename = self.filename_entry.get().strip()
+        if not filename:
+            messagebox.showerror("Errore", "Inserisci nome file")
+            return
+        
+        if not filename.lower().endswith(('.mp3', '.wav')):
+            filename += '.mp3'
+        
+        output_path = os.path.join(self.clips_folder, filename)
+        
+        start_sample = int(self.start_time * self.sample_rate)
+        end_sample = int(self.end_time * self.sample_rate)
+        
+        if len(self.audio_data.shape) > 1:
+            segment = self.audio_data[start_sample:end_sample, :]
+        else:
+            segment = self.audio_data[start_sample:end_sample]
+        
+        try:
+            temp_wav = output_path.replace('.mp3', '_temp.wav')
+            sf.write(temp_wav, segment, self.sample_rate)
+            
+            if filename.lower().endswith('.mp3'):
+                ffmpeg = os.path.join(os.path.dirname(__file__), 'ffmpeg-8.0.1-essentials_build', 'bin', 'ffmpeg.exe')
+                subprocess.run([
+                    ffmpeg, '-i', temp_wav,
+                    '-codec:a', 'libmp3lame', '-qscale:a', '2',
+                    '-y', output_path
+                ], check=True, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                os.remove(temp_wav)
+            else:
+                os.rename(temp_wav, output_path)
+            
+            duration = self.end_time - self.start_time
+            messagebox.showinfo(
+                "✓ Clip Salvata",
+                f"File: {filename}\nDurata: {duration:.2f}s\n\nLa clip è stata aggiunta alla soundboard!"
+            )
+            
+            if self.on_download_complete:
+                self.on_download_complete(output_path)
+            
+            # Reset
+            self.preview_container.pack_forget()
+            self.download_btn.configure(text="📥 Scarica & Mostra Waveform")
+            self.progress_label.configure(text="")
+            self.url_entry.delete(0, 'end')
+            
+            # Cleanup temp
+            if self.temp_file and os.path.exists(self.temp_file):
+                try:
+                    os.remove(self.temp_file)
+                except:
+                    pass
+            
+        except Exception as e:
+            messagebox.showerror("Errore", f"Errore salvataggio:\n{str(e)}")

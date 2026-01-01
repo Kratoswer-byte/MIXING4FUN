@@ -15,7 +15,8 @@ def build_exe():
     
     # Parametri PyInstaller
     cmd = [
-        'pyinstaller',
+        sys.executable,                 # Python corrente
+        '-m', 'PyInstaller',            # Esegui come modulo
         '--onefile',                    # Un singolo file exe
         '--windowed',                   # Senza console (GUI)
         '--icon=soundbar.ico',          # Icona personalizzata
@@ -39,8 +40,8 @@ def build_exe():
     
     # Esegui PyInstaller
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        print(result.stdout)
+        print("\n⏳ Compilazione in corso... (può richiedere alcuni minuti)\n")
+        result = subprocess.run(cmd, check=True)
         
         print("\n" + "=" * 60)
         print("✅ Eseguibile creato con successo!")

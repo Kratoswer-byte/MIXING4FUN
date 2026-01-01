@@ -6,6 +6,7 @@ from tkinter import filedialog, messagebox, Canvas
 import os
 import sys
 import logging
+import time
 from audio_engine import AudioMixer, AudioClip
 from youtube_downloader import YouTubeDownloader
 from mixer_engine import ProMixer, MixerChannel, OutputBus
@@ -120,7 +121,8 @@ class AudioMixerApp(ctk.CTk):
             except:
                 print(f"   Uso sample rate default: {primary_sr} Hz")
         
-        # Buffer più grande (1024) per evitare audio a scatti e dropout
+        # Buffer 1024 per stabilità audio (riduce scricchiolii)
+        # Latenza: ~21ms @ 48kHz (accettabile per streaming/Discord)
         self.pro_mixer = ProMixer(sample_rate=primary_sr, buffer_size=1024)
         self.pro_mixer_widgets = {}  # Widgets mixer tab
         self.pro_mixer_running = False
@@ -153,7 +155,7 @@ class AudioMixerApp(ctk.CTk):
         print(f"🎛️ Inizializzazione soundboard (integrata con ProMixer)...")
         self.mixer = AudioMixer(
             sample_rate=primary_sr,  # Usa lo stesso sample rate del ProMixer
-            buffer_size=1024,  # Buffer grande per evitare audio a scatti
+            buffer_size=1024,  # Buffer 1024 per stabilità
             virtual_output_callback=lambda audio: None  # Callback per ProMixer
         )
         
@@ -188,6 +190,9 @@ class AudioMixerApp(ctk.CTk):
         # Create tabview for main content
         self.tabview = ctk.CTkTabview(self, width=900)
         self.tabview.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
+        
+        # Aggiungi callback per cambio tab
+        self.tabview.configure(command=self._on_tab_change)
         
         # Tab 1: Soundboard
         self.tab_soundboard = self.tabview.add("🎮 Soundboard")
@@ -237,14 +242,14 @@ class AudioMixerApp(ctk.CTk):
         except Exception as e:
             logger.error(f"Errore registrazione hotkey globale: {e}", exc_info=True)
         
-        # Registra hotkey per toggle loop (Pause)
+        # Registra hotkey per toggle loop soundboard (*)
         # Usa hook_key per compatibilità con i giochi
         try:
-            def pause_callback(e):
+            def asterisk_callback(e):
                 if e.event_type == 'down':
-                    self.toggle_loop()
-            keyboard.hook_key('pause', pause_callback, suppress=False)
-            logger.info("Hotkey loop registrato: Pause = Toggle Loop Globale")
+                    self.toggle_soundboard_loop()
+            keyboard.hook_key('*', asterisk_callback, suppress=False)
+            logger.info("Hotkey loop registrato: * = Toggle Loop Soundboard")
         except Exception as e:
             logger.error(f"Errore registrazione hotkey loop: {e}", exc_info=True)
         
@@ -361,7 +366,7 @@ class AudioMixerApp(ctk.CTk):
         
         ctk.CTkLabel(
             status_frame,
-            text="Premi Pause per toggle loop",
+            text="Premi * per toggle loop",
             font=ctk.CTkFont(family="Segoe UI", size=11),
             text_color=COLORS["text_secondary"]
         ).pack(pady=(0, 10))
@@ -551,24 +556,28 @@ class AudioMixerApp(ctk.CTk):
             logger.error(f"Errore nell'aggiornamento clips: {e}", exc_info=True)
     
     def reorder_clips(self):
-        """Riordina le clip nella griglia rimuovendo spazi vuoti"""
-        logger.info("Riordinamento clips nella pagina corrente...")
+        """Riordina le clip in TUTTE le pagine rimuovendo spazi vuoti"""
+        logger.info("Riordinamento clips in tutte le pagine F1-F5...")
         
         try:
-            # Ottieni tutte le clip della pagina corrente
-            current_page_clips = []
+            # Raggruppa clip per pagina
+            pages_clips = {1: [], 2: [], 3: [], 4: [], 5: []}
             for clip_name, widget in self.clip_widgets.items():
                 clip_page = self.clip_pages.get(clip_name, 1)
-                if clip_page == self.current_page:
-                    current_page_clips.append((clip_name, widget))
+                pages_clips[clip_page].append((clip_name, widget))
             
-            # Riposiziona le clip in modo compatto
-            for index, (clip_name, widget) in enumerate(current_page_clips):
-                row = index // 3
-                col = index % 3
-                widget.grid(row=row, column=col, padx=10, pady=10, sticky="nsew")
+            # Riordina ogni pagina
+            for page_num, clips_list in pages_clips.items():
+                for index, (clip_name, widget) in enumerate(clips_list):
+                    row = index // 3
+                    col = index % 3
+                    widget.grid(row=row, column=col, padx=10, pady=10, sticky="nsew")
+                    # Nascondi widget se non è la pagina corrente
+                    if page_num != self.current_page:
+                        widget.grid_remove()
             
-            logger.info(f"✓ Riordinate {len(current_page_clips)} clip nella pagina {self.current_page}")
+            total_clips = sum(len(clips) for clips in pages_clips.values())
+            logger.info(f"✓ Riordinate {total_clips} clip in tutte le pagine")
             
         except Exception as e:
             logger.error(f"Errore nel riordinamento clips: {e}", exc_info=True)
@@ -673,7 +682,7 @@ class AudioMixerApp(ctk.CTk):
         self.master_slider = ctk.CTkSlider(
             master_frame,
             from_=0,
-            to=100,
+            to=200,
             command=self.on_master_volume_changed
         )
         self.master_slider.set(100)
@@ -695,7 +704,7 @@ class AudioMixerApp(ctk.CTk):
         self.secondary_slider = ctk.CTkSlider(
             secondary_frame,
             from_=0,
-            to=100,
+            to=200,
             command=self.on_secondary_volume_changed
         )
         self.secondary_slider.set(100)
@@ -732,9 +741,29 @@ class AudioMixerApp(ctk.CTk):
         self.bass_slider.set(100)
         self.bass_slider.pack(fill="x", pady=(2, 0))
         
+        # Loop Controls
+        loop_frame = ctk.CTkFrame(self.control_panel, fg_color="transparent")
+        loop_frame.grid(row=0, column=4, padx=15, pady=15, sticky="ew")
+        
+        ctk.CTkLabel(
+            loop_frame,
+            text="🔁 Loop",
+            font=ctk.CTkFont(family="Segoe UI", size=20, weight="bold")
+        ).pack(anchor="w")
+        
+        self.loop_soundboard_btn = ctk.CTkButton(
+            loop_frame,
+            text="🔁 Loop Soundboard (*)",
+            command=self.toggle_soundboard_loop,
+            fg_color=COLORS["bg_card"],
+            hover_color=COLORS["bg_secondary"],
+            height=40
+        )
+        self.loop_soundboard_btn.pack(fill="x", pady=(10, 5))
+        
         # Registrazione
         rec_frame = ctk.CTkFrame(self.control_panel, fg_color="transparent")
-        rec_frame.grid(row=0, column=4, padx=15, pady=15, sticky="ew")
+        rec_frame.grid(row=0, column=5, padx=15, pady=15, sticky="ew")
         
         ctk.CTkLabel(
             rec_frame,
@@ -770,6 +799,10 @@ class AudioMixerApp(ctk.CTk):
                 
                 # Crea clip
                 clip = AudioClip(file_path, clip_name, target_sample_rate=self.mixer.sample_rate)
+                
+                # Applica stato loop globale se attivo
+                clip.is_looping = self.loop_enabled
+                
                 self.mixer.add_clip(clip)
                 
                 # Crea widget
@@ -892,6 +925,38 @@ class AudioMixerApp(ctk.CTk):
         """Attiva/disattiva reverb"""
         self.mixer.reverb_enabled = self.reverb_var.get()
     
+    def toggle_soundboard_loop(self):
+        """Attiva/disattiva loop globale per tutte le clip della soundboard"""
+        self.loop_enabled = not self.loop_enabled
+        
+        # Applica lo stato loop a tutte le clip
+        for clip_name, clip in self.mixer.clips.items():
+            clip.is_looping = self.loop_enabled
+        
+        # Aggiorna UI del bottone
+        if self.loop_enabled:
+            self.loop_soundboard_btn.configure(
+                text="🔁 Loop ON (*)",
+                fg_color=COLORS["accent"],
+                hover_color=COLORS["accent_hover"]
+            )
+            # Aggiorna sidebar
+            self.loop_label.configure(
+                text="🔁 Loop: ON",
+                text_color=COLORS["accent"]
+            )
+        else:
+            self.loop_soundboard_btn.configure(
+                text="🔁 Loop Soundboard (*)",
+                fg_color=COLORS["bg_card"],
+                hover_color=COLORS["bg_secondary"]
+            )
+            # Aggiorna sidebar
+            self.loop_label.configure(
+                text="🔁 Loop: OFF",
+                text_color=COLORS["text_muted"]
+            )
+    
     def on_bass_changed(self, value):
         """Callback per bass boost"""
         bass_pct = int(value - 100)
@@ -899,25 +964,31 @@ class AudioMixerApp(ctk.CTk):
         self.mixer.bass_boost = value / 100.0
     
     def toggle_recording(self):
-        """Avvia/ferma la registrazione"""
+        """Avvia/ferma la registrazione dall'output A1 (Discord/streaming)"""
         if not self.is_recording:
-            self.mixer.start_recording()
+            # Usa ProMixer invece di AudioMixer per registrare
+            self.pro_mixer.start_recording('A1')
             self.is_recording = True
             self.record_btn.configure(
                 text="⏹ Ferma Registrazione",
                 fg_color="#ff0000"
             )
+            messagebox.showinfo("🔴 Registrazione", "Registrazione avviata da bus A1\n(Discord/Streaming output)")
         else:
             output_file = filedialog.asksaveasfilename(
                 defaultextension=".wav",
-                filetypes=[("WAV files", "*.wav")]
+                filetypes=[("WAV files", "*.wav")],
+                initialfile=f"recording_{int(time.time())}.wav"
             )
             
             if output_file:
-                self.mixer.stop_recording(output_file)
-                messagebox.showinfo("Registrazione", f"File salvato:\n{output_file}")
+                self.pro_mixer.stop_recording(output_file)
+                messagebox.showinfo("✓ Registrazione", f"File salvato:\n{output_file}")
             else:
-                self.mixer.stop_recording("recording.wav")
+                # Salva comunque con nome default
+                default_name = f"recording_{int(time.time())}.wav"
+                self.pro_mixer.stop_recording(default_name)
+                messagebox.showinfo("✓ Registrazione", f"File salvato:\n{default_name}")
             
             self.is_recording = False
             self.record_btn.configure(
@@ -936,6 +1007,10 @@ class AudioMixerApp(ctk.CTk):
                 file_path = os.path.join(folder, file)
                 try:
                     clip = AudioClip(file_path, file, target_sample_rate=self.mixer.sample_rate)
+                    
+                    # Applica stato loop globale se attivo
+                    clip.is_looping = self.loop_enabled
+                    
                     self.mixer.add_clip(clip)
                     
                     row = len(self.clip_widgets) // 3
@@ -1050,9 +1125,23 @@ class AudioMixerApp(ctk.CTk):
         )
         self.enable_secondary_check.grid(row=2, column=0, columnspan=2, pady=(0, 15), padx=15, sticky="w")
         
+        # Checkbox Avvio Automatico
+        startup_frame = ctk.CTkFrame(main_container, fg_color=COLORS["bg_card"])
+        startup_frame.grid(row=2, column=0, pady=10, sticky="ew")
+        
+        self.autostart_var = ctk.BooleanVar(value=self.check_autostart())
+        self.autostart_check = ctk.CTkCheckBox(
+            startup_frame,
+            text="🚀 Avvia automaticamente con Windows",
+            variable=self.autostart_var,
+            command=self.toggle_autostart,
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        self.autostart_check.grid(row=0, column=0, pady=15, padx=15, sticky="w")
+        
         # Pulsanti azione
         buttons_frame = ctk.CTkFrame(main_container, fg_color="transparent")
-        buttons_frame.grid(row=2, column=0, pady=20, sticky="ew")
+        buttons_frame.grid(row=3, column=0, pady=20, sticky="ew")
         buttons_frame.grid_columnconfigure(0, weight=1)
         buttons_frame.grid_columnconfigure(1, weight=1)
         
@@ -1081,7 +1170,7 @@ class AudioMixerApp(ctk.CTk):
         
         # Sample Rate Override
         sr_frame = ctk.CTkFrame(main_container, fg_color=COLORS["bg_card"])
-        sr_frame.grid(row=3, column=0, pady=10, sticky="ew")
+        sr_frame.grid(row=4, column=0, pady=10, sticky="ew")
         sr_frame.grid_columnconfigure(1, weight=1)
         
         ctk.CTkLabel(
@@ -1803,30 +1892,29 @@ class AudioMixerApp(ctk.CTk):
         btn_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
         btn_frame.grid(row=0, column=1, sticky="e")
         
-        self.mixer_start_btn = ctk.CTkButton(
+        self.mute_a1_btn = ctk.CTkButton(
             btn_frame,
-            text="▶ AVVIA MIXER",
+            text="🔊 A1 (Discord)",
             width=140,
             height=40,
             fg_color=COLORS["success"],
             hover_color="#059669",
-            command=self.start_pro_mixer,
+            command=self.toggle_mute_a1,
             font=ctk.CTkFont(size=14, weight="bold")
         )
-        self.mixer_start_btn.grid(row=0, column=0, padx=5)
+        self.mute_a1_btn.grid(row=0, column=0, padx=5)
         
-        self.mixer_stop_btn = ctk.CTkButton(
+        self.mute_a2_btn = ctk.CTkButton(
             btn_frame,
-            text="⏹ FERMA MIXER",
+            text="🔊 A2 (Cuffie)",
             width=140,
             height=40,
-            fg_color=COLORS["danger"],
-            hover_color="#b91c1c",
-            command=self.stop_pro_mixer,
-            state="disabled",
+            fg_color=COLORS["success"],
+            hover_color="#059669",
+            command=self.toggle_mute_a2,
             font=ctk.CTkFont(size=14, weight="bold")
         )
-        self.mixer_stop_btn.grid(row=0, column=1, padx=5)
+        self.mute_a2_btn.grid(row=0, column=1, padx=5)
         
         config_btn = ctk.CTkButton(
             btn_frame,
@@ -1928,6 +2016,197 @@ class AudioMixerApp(ctk.CTk):
             strip = self.create_bus_strip(buses_grid, bus_name, bus)
             strip.grid(row=0, column=i, padx=5, pady=5, sticky="ns")
             self.mixer_bus_strips[bus_name] = strip
+        
+        # YouTube Player Section (orizzontale in basso)
+        yt_separator = ctk.CTkFrame(self.tab_mixer, height=3, fg_color=COLORS["border"])
+        yt_separator.grid(row=2, column=0, sticky="ew", padx=10)
+        
+        self.create_youtube_player()
+    
+    def create_youtube_player(self):
+        """Crea il Media Player orizzontale nel mixer (usa canale HW3)"""
+        yt_frame = ctk.CTkFrame(self.tab_mixer, fg_color=COLORS["bg_secondary"], height=150)
+        yt_frame.grid(row=3, column=0, sticky="ew", padx=10, pady=10)
+        yt_frame.grid_columnconfigure(1, weight=1)
+        
+        # Label titolo
+        ctk.CTkLabel(
+            yt_frame,
+            text="🎵 Media Player (HW3)",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLORS["accent"]
+        ).grid(row=0, column=0, padx=15, pady=(10, 5), sticky="w")
+        
+        # Input URL
+        url_container = ctk.CTkFrame(yt_frame, fg_color="transparent")
+        url_container.grid(row=1, column=0, columnspan=5, padx=15, pady=5, sticky="ew")
+        
+        ctk.CTkLabel(
+            url_container,
+            text="🔗 Link:",
+            font=ctk.CTkFont(size=12)
+        ).pack(side="left", padx=(0, 5))
+        
+        self.yt_url_entry = ctk.CTkEntry(
+            url_container,
+            placeholder_text="Inserisci link YouTube...",
+            height=35,
+            font=ctk.CTkFont(size=12)
+        )
+        self.yt_url_entry.pack(side="left", fill="x", expand=True, padx=5)
+        
+        self.yt_load_btn = ctk.CTkButton(
+            url_container,
+            text="📥 YouTube",
+            width=100,
+            height=35,
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_hover"],
+            command=self.load_youtube_url,
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        self.yt_load_btn.pack(side="left", padx=5)
+        
+        self.yt_file_btn = ctk.CTkButton(
+            url_container,
+            text="📂 File PC",
+            width=100,
+            height=35,
+            fg_color=COLORS["success"],
+            hover_color="#059669",
+            command=self.load_local_file,
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        self.yt_file_btn.pack(side="left", padx=5)
+        
+        # Progress bar
+        progress_container = ctk.CTkFrame(yt_frame, fg_color="transparent")
+        progress_container.grid(row=2, column=0, columnspan=5, padx=15, pady=5, sticky="ew")
+        
+        self.yt_time_label = ctk.CTkLabel(
+            progress_container,
+            text="0:00",
+            font=ctk.CTkFont(size=11),
+            width=50
+        )
+        self.yt_time_label.pack(side="left", padx=5)
+        
+        self.yt_progress_slider = ctk.CTkSlider(
+            progress_container,
+            from_=0,
+            to=100,
+            command=self.on_media_seek,
+            state="disabled"
+        )
+        self.yt_progress_slider.set(0)
+        self.yt_progress_slider.pack(side="left", fill="x", expand=True, padx=5)
+        
+        self.yt_duration_label = ctk.CTkLabel(
+            progress_container,
+            text="0:00",
+            font=ctk.CTkFont(size=11),
+            width=50
+        )
+        self.yt_duration_label.pack(side="left", padx=5)
+        
+        # Controlli playback
+        controls_frame = ctk.CTkFrame(yt_frame, fg_color="transparent")
+        controls_frame.grid(row=3, column=0, padx=15, pady=10, sticky="w")
+        
+        self.yt_play_btn = ctk.CTkButton(
+            controls_frame,
+            text="▶️ PLAY",
+            width=80,
+            height=35,
+            fg_color=COLORS["success"],
+            hover_color="#059669",
+            command=self.play_youtube,
+            state="disabled",
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        self.yt_play_btn.pack(side="left", padx=2)
+        
+        self.yt_stop_btn = ctk.CTkButton(
+            controls_frame,
+            text="⏹️ STOP",
+            width=80,
+            height=35,
+            fg_color=COLORS["danger"],
+            hover_color="#b91c1c",
+            command=self.stop_youtube,
+            state="disabled",
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        self.yt_stop_btn.pack(side="left", padx=2)
+        
+        self.yt_loop_btn = ctk.CTkButton(
+            controls_frame,
+            text="🔁 Loop",
+            width=80,
+            height=35,
+            fg_color=COLORS["bg_card"],
+            hover_color=COLORS["bg_secondary"],
+            command=self.toggle_media_loop,
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        self.yt_loop_btn.pack(side="left", padx=2)
+        
+        # Volume slider
+        vol_frame = ctk.CTkFrame(yt_frame, fg_color="transparent")
+        vol_frame.grid(row=3, column=1, padx=15, pady=10, sticky="ew")
+        
+        ctk.CTkLabel(
+            vol_frame,
+            text="🔊 Volume:",
+            font=ctk.CTkFont(size=11)
+        ).pack(side="left", padx=(0, 5))
+        
+        self.yt_volume_slider = ctk.CTkSlider(
+            vol_frame,
+            from_=0,
+            to=100,
+            width=150,
+            command=self.on_youtube_volume_change
+        )
+        self.yt_volume_slider.set(80)
+        self.yt_volume_slider.pack(side="left", padx=5)
+        
+        self.yt_volume_label = ctk.CTkLabel(
+            vol_frame,
+            text="80%",
+            font=ctk.CTkFont(size=11),
+            width=40
+        )
+        self.yt_volume_label.pack(side="left")
+        
+        # Info: routing gestito dal canale HW3
+        routing_info = ctk.CTkLabel(
+            vol_frame,
+            text="→ Usa i pulsanti routing del canale HW3 per scegliere l'uscita",
+            font=ctk.CTkFont(size=10),
+            text_color=COLORS["text_muted"]
+        )
+        routing_info.pack(side="left", padx=15)
+        
+        # Info status
+        self.yt_status_label = ctk.CTkLabel(
+            yt_frame,
+            text="⏸️ Nessun audio caricato",
+            font=ctk.CTkFont(size=11),
+            text_color=COLORS["text_muted"]
+        )
+        self.yt_status_label.grid(row=0, column=1, columnspan=4, padx=15, pady=(10, 5), sticky="e")
+        
+        # Variabili stato media player
+        self.media_player_audio = None  # Dati audio caricati
+        self.media_player_sr = None  # Sample rate
+        self.media_player_positions = {}  # Posizioni per ogni bus (come AudioClip)
+        self.media_player_playing = False
+        self.media_player_looping = False  # Stato loop media player
+        self.media_player_duration = 0  # Durata totale in samples
+        
+        # Avvia aggiornamento progress bar
+        self.update_media_progress()
     
     def create_channel_strip(self, parent, channel_id, channel):
         """Crea uno strip per un canale input"""
@@ -2051,6 +2330,20 @@ class AudioMixerApp(ctk.CTk):
         )
         solo_btn.grid(row=0, column=1, padx=2)
         strip_frame.solo_btn = solo_btn
+        
+        # Pulsante FX (effetti/noise gate)
+        fx_btn = ctk.CTkButton(
+            controls,
+            text="FX",
+            width=40,
+            height=28,
+            fg_color=COLORS["bg_card"],
+            hover_color=COLORS["accent"],
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=lambda: self.open_channel_fx(channel_id)
+        )
+        fx_btn.grid(row=0, column=2, padx=2)
+        strip_frame.fx_btn = fx_btn
         
         return strip_frame
     
@@ -2315,6 +2608,8 @@ class AudioMixerApp(ctk.CTk):
             new_state = not current
             self.pro_mixer.set_channel_routing(channel_id, bus_name, new_state)
             
+            print(f"🔀 Routing {channel_id} → {bus_name}: {'ON' if new_state else 'OFF'}")
+            
             # Aggiorna UI
             if channel_id in self.mixer_channel_strips:
                 btn = self.mixer_channel_strips[channel_id].routing_buttons[bus_name]
@@ -2356,13 +2651,405 @@ class AudioMixerApp(ctk.CTk):
                     text="MUTED" if bus.mute else "MUTE"
                 )
     
+    def load_local_file(self):
+        """Carica file audio locale dal PC"""
+        file_path = filedialog.askopenfilename(
+            title="Seleziona file audio",
+            filetypes=[
+                ("Audio Files", "*.mp3 *.wav *.flac *.ogg *.m4a"),
+                ("All Files", "*.*")
+            ]
+        )
+        
+        if file_path:
+            self.yt_status_label.configure(text="⏳ Caricamento file...")
+            self.after(100, lambda: self._load_media_file(file_path, os.path.basename(file_path)))
+    
+    def _load_media_file(self, file_path, title):
+        """Carica file audio nel media player"""
+        try:
+            import soundfile as sf
+            
+            # Carica file audio
+            audio_data, sr = sf.read(file_path, dtype='float32')
+            
+            print(f"📀 Media Player: {int(sr)}Hz", end="")
+            
+            # Converti a stereo se necessario
+            if len(audio_data.shape) == 1:
+                audio_data = np.column_stack([audio_data, audio_data])
+            
+            # Resample se necessario AL SAMPLE RATE DEL MIXER
+            target_sr = self.pro_mixer.sample_rate
+            print(f" → Target: {target_sr}Hz")
+            
+            if sr != target_sr:
+                print(f"   ⚠️ Resampling: {sr}Hz → {target_sr}Hz")
+                from scipy.signal import resample_poly
+                from math import gcd
+                g = gcd(target_sr, int(sr))
+                up = target_sr // g
+                down = int(sr) // g
+                
+                print(f"   Up={up}, Down={down}, GCD={g}")
+                
+                resampled_channels = []
+                for ch in range(audio_data.shape[1]):
+                    resampled_ch = resample_poly(audio_data[:, ch], up, down)
+                    resampled_channels.append(resampled_ch)
+                audio_data = np.column_stack(resampled_channels).astype(np.float32)
+                sr = target_sr
+                print(f" ✓")
+            
+            # Salva dati CON SAMPLE RATE CORRETTO
+            self.media_player_audio = audio_data
+            self.media_player_sr = target_sr  # USA IL TARGET, NON IL SR ORIGINALE
+            self.media_player_duration = len(audio_data)
+            self.media_player_positions = {}  # Reset posizioni per tutti i bus
+            self.media_player_playing = False
+            self._media_debug_printed = False  # Reset flag debug
+            
+            print(f"✅ Audio caricato: {len(audio_data)} samples @ {target_sr}Hz")
+            print(f"   Durata: {len(audio_data) / target_sr:.2f} secondi")
+            
+            # Aggiorna UI
+            duration_sec = self.media_player_duration / sr
+            duration_str = f"{int(duration_sec // 60)}:{int(duration_sec % 60):02d}"
+            self.yt_duration_label.configure(text=duration_str)
+            self.yt_status_label.configure(text=f"✅ {title[:40]}...", text_color=COLORS["success"])
+            self.yt_play_btn.configure(state="normal")
+            self.yt_stop_btn.configure(state="normal")
+            self.yt_progress_slider.configure(state="normal")
+            
+            # Configura HW3 per ricevere audio
+            self._setup_media_player_hw3()
+            
+        except Exception as e:
+            messagebox.showerror("Errore", f"Impossibile caricare file:\n{e}")
+            self.yt_status_label.configure(text="❌ Errore caricamento", text_color=COLORS["error"])
+    
+    def _setup_media_player_hw3(self):
+        """Configura canale HW3 per ricevere audio dal media player"""
+        # Imposta callback per HW3
+        hw3_channel = self.pro_mixer.channels.get('HW3')
+        if hw3_channel:
+            hw3_channel.channel_type = 'python'  # Imposta come canale Python
+            hw3_channel.audio_callback = self._media_player_callback
+            
+            print(f"✅ Media Player configurato su HW3")
+            print(f"   Usa i pulsanti routing del canale HW3 per scegliere l'uscita")
+    
+    def _media_player_callback(self, frames, bus_name=None):
+        """Callback che fornisce audio al canale HW3
+        
+        Args:
+            frames: Numero di frame richiesti
+            bus_name: Nome del bus che richiede audio (per posizioni indipendenti)
+        """
+        try:
+            if not self.media_player_playing or self.media_player_audio is None:
+                return np.zeros((frames, 2), dtype=np.float32)
+            
+            # POSIZIONI INDIPENDENTI PER OGNI BUS (come AudioClip)
+            # Ogni bus ha la sua posizione, così non si influenzano
+            
+            if not hasattr(self, '_media_positions'):
+                self._media_positions = {}
+                print(f"🎵 Media Player callback inizializzato - Duration: {self.media_player_duration} samples")
+            
+            # Ottieni o crea posizione per questo bus
+            if bus_name not in self._media_positions:
+                self._media_positions[bus_name] = 0
+            
+            position = self._media_positions[bus_name]
+            
+            # Genera audio per questo bus
+            start = position
+            end = min(start + frames, self.media_player_duration)
+            
+            audio = self.media_player_audio[start:end].copy()
+            
+            # Applica volume
+            volume = self.yt_volume_slider.get() / 100.0
+            audio *= volume
+            
+            # Pad se necessario
+            if len(audio) < frames:
+                padding = np.zeros((frames - len(audio), 2), dtype=np.float32)
+                audio = np.vstack([audio, padding])
+                # Fine file per questo bus
+                if position + frames >= self.media_player_duration:
+                    # Se TUTTI i bus hanno finito, ferma la riproduzione
+                    all_finished = all(pos >= self.media_player_duration for pos in self._media_positions.values())
+                    if all_finished:
+                        self.media_player_playing = False
+                        self.after(0, self._on_playback_finished)
+                        print(f"⏹️ Media Player: Fine riproduzione")
+            
+            # Avanza posizione per questo bus
+            self._media_positions[bus_name] = end
+            
+            # Log ogni secondo (solo per il primo bus)
+            if bus_name == 'A1' or (bus_name and len(self._media_positions) == 1):
+                if not hasattr(self, '_last_log_pos'):
+                    self._last_log_pos = 0
+                if start - self._last_log_pos >= 48000:
+                    print(f"🎵 Playing [{bus_name}]: {start/48000:.1f}s / {self.media_player_duration/48000:.1f}s | Volume: {volume*100:.0f}%")
+                    self._last_log_pos = start
+            
+            return audio
+        except Exception as e:
+            print(f"❌ Errore in _media_player_callback: {e}")
+            import traceback
+            traceback.print_exc()
+            return np.zeros((frames, 2), dtype=np.float32)
+    
+    def _on_playback_finished(self):
+        """Gestisce fine riproduzione"""
+        if self.media_player_looping:
+            # Riavvia la riproduzione se loop è attivo
+            self._media_positions = {}  # Reset posizioni corrette
+            self.media_player_playing = True
+            self.yt_status_label.configure(text="🔁 Loop attivo", text_color=COLORS["accent"])
+            print(f"🔁 Media Player: Riparte in loop")
+        else:
+            self.yt_status_label.configure(text="⏹️ Fine riproduzione", text_color=COLORS["text_muted"])
+            if hasattr(self, '_media_master_position'):
+                self._media_master_position = 0
+            if hasattr(self, '_media_positions'):
+                self._media_positions = {}
+            self.media_player_playing = False
+    
+    def load_youtube_url(self):
+        """Carica audio da URL YouTube"""
+        url = self.yt_url_entry.get().strip()
+        if not url:
+            messagebox.showwarning("URL Mancante", "Inserisci un link YouTube valido")
+            return
+        
+        # Disabilita pulsante durante il caricamento
+        self.yt_load_btn.configure(state="disabled", text="⏳ Caricamento...")
+        self.yt_status_label.configure(text="⏳ Download audio in corso...")
+        
+        def download_thread():
+            try:
+                import yt_dlp
+                import tempfile
+                import soundfile as sf
+                
+                # Crea temp file
+                temp_audio = os.path.join(tempfile.gettempdir(), "yt_mixer_audio.wav")
+                
+                # Opzioni yt-dlp per audio
+                ydl_opts = {
+                    'format': 'bestaudio/best',
+                    'postprocessors': [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'wav',
+                    }],
+                    'outtmpl': temp_audio.replace('.wav', ''),
+                    'quiet': True,
+                    'no_warnings': True,
+                }
+                
+                # Download
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    title = info.get('title', 'YouTube Audio')
+                
+                # Carica come clip
+                self.after(0, lambda: self._load_media_file(temp_audio, title))
+                self.after(0, lambda: self.yt_load_btn.configure(state="normal", text="📥 YouTube"))
+                
+            except Exception as e:
+                self.after(0, lambda: self._youtube_load_error(str(e)))
+        
+        import threading
+        threading.Thread(target=download_thread, daemon=True).start()
+    
+    def _youtube_load_error(self, error):
+        """Gestisce errore caricamento YouTube"""
+        messagebox.showerror("Errore", f"Impossibile caricare audio:\n{error}")
+        self.yt_status_label.configure(text="❌ Errore caricamento", text_color=COLORS["error"])
+        self.yt_load_btn.configure(state="normal", text="📥 YouTube")
+    
+    def play_youtube(self):
+        """Avvia riproduzione media player"""
+        if self.media_player_audio is not None:
+            # Verifica routing di HW3
+            hw3_channel = self.pro_mixer.channels.get('HW3')
+            if hw3_channel:
+                active_routes = [bus for bus, enabled in hw3_channel.routing.items() if enabled]
+                print(f"▶️ Media Player START")
+                print(f"   Audio: {self.media_player_duration/48000:.1f}s @ 48kHz")
+                print(f"   HW3 Routing: {active_routes if active_routes else 'NESSUNO ATTIVO!'}")
+                
+                if not active_routes:
+                    messagebox.showwarning(
+                        "Nessun routing attivo",
+                        "Il canale HW3 non ha routing attivi!\n\n"
+                        "Attiva almeno un pulsante (A1, A2, etc.) sul canale HW3 nel mixer."
+                    )
+                    return
+            else:
+                print(f"❌ Canale HW3 non trovato!")
+                return
+            
+            self.media_player_playing = True
+            self.yt_status_label.configure(text="▶️ In riproduzione...", text_color=COLORS["success"])
+    
+    def stop_youtube(self):
+        """Ferma riproduzione media player"""
+        self.media_player_playing = False
+        if hasattr(self, '_media_positions'):
+            self._media_positions = {}  # Reset tutte le posizioni
+        self.yt_status_label.configure(text="⏹️ Fermato", text_color=COLORS["text_muted"])
+    
+    def toggle_media_loop(self):
+        """Attiva/disattiva loop del media player"""
+        self.media_player_looping = not self.media_player_looping
+        
+        # Aggiorna UI del bottone
+        if self.media_player_looping:
+            self.yt_loop_btn.configure(
+                text="🔁 ON",
+                fg_color=COLORS["accent"],
+                hover_color=COLORS["accent_hover"]
+            )
+            if self.media_player_playing:
+                self.yt_status_label.configure(text="🔁 Loop attivo", text_color=COLORS["accent"])
+        else:
+            self.yt_loop_btn.configure(
+                text="🔁 Loop",
+                fg_color=COLORS["bg_card"],
+                hover_color=COLORS["bg_secondary"]
+            )
+            if self.media_player_playing:
+                self.yt_status_label.configure(text="▶️ In riproduzione", text_color=COLORS["success"])
+    
+    def on_youtube_volume_change(self, value):
+        """Cambia volume media player"""
+        volume = int(value)
+        self.yt_volume_label.configure(text=f"{volume}%")
+    
+    def on_media_seek(self, value):
+        """Seek nella posizione del media player"""
+        if self.media_player_audio is not None:
+            # Converti percentuale in samples
+            position_pct = float(value) / 100.0
+            new_position = int(position_pct * self.media_player_duration)
+            
+            # Aggiorna tutte le posizioni di tutti i bus
+            if hasattr(self, '_media_positions'):
+                for bus_name in list(self._media_positions.keys()):
+                    self._media_positions[bus_name] = new_position
+    
+    def update_media_progress(self):
+        """Aggiorna progress bar del media player"""
+        # Aggiorna UI
+        if self.media_player_audio is not None and self.media_player_duration > 0:
+            # Usa la posizione media di tutti i bus attivi
+            if hasattr(self, '_media_positions') and self._media_positions:
+                current_pos = sum(self._media_positions.values()) / len(self._media_positions)
+            else:
+                current_pos = 0
+            
+            # Calcola percentuale
+            progress_pct = (current_pos / self.media_player_duration) * 100.0
+            
+            # Aggiorna slider senza triggerare callback
+            self.yt_progress_slider.set(progress_pct)
+            
+            # Aggiorna label tempo
+            current_sec = current_pos / self.media_player_sr
+            current_str = f"{int(current_sec // 60)}:{int(current_sec % 60):02d}"
+            self.yt_time_label.configure(text=current_str)
+        
+        # Richiama dopo 100ms
+        self.after(100, self.update_media_progress)
+    
+    def open_channel_fx(self, channel_id):
+        """Apri finestra effetti per un canale"""
+        from ui.fx_window import ChannelFXWindow
+        ChannelFXWindow(self, self.pro_mixer, channel_id)
+    
+    def toggle_mute_a1(self):
+        """Toggle mute del bus A1 (Discord)"""
+        bus = self.pro_mixer.output_buses.get('A1')
+        if bus:
+            bus.mute = not bus.mute
+            self.mute_a1_btn.configure(
+                text="🔇 A1 MUTED" if bus.mute else "🔊 A1 (Discord)",
+                fg_color=COLORS["danger"] if bus.mute else COLORS["success"]
+            )
+    
+    def toggle_mute_a2(self):
+        """Toggle mute del bus A2 (Cuffie)"""
+        bus = self.pro_mixer.output_buses.get('A2')
+        if bus:
+            bus.mute = not bus.mute
+            self.mute_a2_btn.configure(
+                text="🔇 A2 MUTED" if bus.mute else "🔊 A2 (Cuffie)",
+                fg_color=COLORS["danger"] if bus.mute else COLORS["success"]
+            )
+    
+    def check_autostart(self):
+        """Verifica se l'app è nell'avvio automatico di Windows"""
+        try:
+            import winreg
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ)
+            try:
+                winreg.QueryValueEx(key, "SoundboardMixing4Fun")
+                winreg.CloseKey(key)
+                return True
+            except FileNotFoundError:
+                winreg.CloseKey(key)
+                return False
+        except Exception as e:
+            print(f"Errore check autostart: {e}")
+            return False
+    
+    def toggle_autostart(self):
+        """Attiva/disattiva avvio automatico con Windows"""
+        try:
+            import winreg
+            import sys
+            
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_ALL_ACCESS)
+            
+            if self.autostart_var.get():
+                # Aggiungi all'avvio
+                exe_path = os.path.abspath(sys.argv[0])
+                if exe_path.endswith('.py'):
+                    # Se eseguito da Python, usa pythonw.exe
+                    python_exe = sys.executable.replace('python.exe', 'pythonw.exe')
+                    cmd = f'"{python_exe}" "{exe_path}"'
+                else:
+                    # Se è un .exe compilato
+                    cmd = f'"{exe_path}"'
+                
+                winreg.SetValueEx(key, "SoundboardMixing4Fun", 0, winreg.REG_SZ, cmd)
+                messagebox.showinfo("Avvio Automatico", "✓ App aggiunta all'avvio automatico di Windows")
+            else:
+                # Rimuovi dall'avvio
+                try:
+                    winreg.DeleteValue(key, "SoundboardMixing4Fun")
+                    messagebox.showinfo("Avvio Automatico", "✓ App rimossa dall'avvio automatico di Windows")
+                except FileNotFoundError:
+                    pass
+            
+            winreg.CloseKey(key)
+        except Exception as e:
+            messagebox.showerror("Errore", f"Impossibile modificare avvio automatico:\n{e}")
+            self.autostart_var.set(not self.autostart_var.get())
+    
     def start_pro_mixer(self):
         """Avvia il mixer professionale"""
         try:
             self.pro_mixer.start_all()
             self.pro_mixer_running = True
-            self.mixer_start_btn.configure(state="disabled")
-            self.mixer_stop_btn.configure(state="normal")
             messagebox.showinfo("ProMixer", "Mixer professionale avviato!")
         except Exception as e:
             messagebox.showerror("Errore", f"Impossibile avviare mixer:\n{e}")
@@ -2371,8 +3058,6 @@ class AudioMixerApp(ctk.CTk):
         """Ferma il mixer professionale"""
         self.pro_mixer.stop_all()
         self.pro_mixer_running = False
-        self.mixer_start_btn.configure(state="normal")
-        self.mixer_stop_btn.configure(state="disabled")
     
     def open_mixer_config(self):
         """Apre finestra configurazione mixer"""
@@ -2662,9 +3347,27 @@ class AudioMixerApp(ctk.CTk):
             self.trigger_clip_hotkey(clip_name)
         return callback
     
+    def _on_tab_change(self):
+        """Gestisce il cambio di tab"""
+        current_tab = self.tabview.get()
+        # Disabilita hotkey se nella tab YouTube
+        if current_tab == "📥 YouTube":
+            self.soundboard_enabled = False
+            logger.debug("Tab YouTube attiva - hotkey soundboard disabilitate")
+        else:
+            # Riabilita solo se non è già disabilitato dall'utente
+            if hasattr(self, 'enable_checkbox') and self.enable_checkbox.get():
+                self.soundboard_enabled = True
+                logger.debug("Tab cambiata - hotkey soundboard riabilitate")
+    
     def trigger_clip_hotkey(self, clip_name: str):
         """Triggera una clip tramite hotkey"""
         try:
+            # Non triggerare se siamo nella tab YouTube
+            if hasattr(self, 'tabview') and self.tabview.get() == "📥 YouTube":
+                logger.debug(f"Tab YouTube attiva, ignoro hotkey per {clip_name}")
+                return
+            
             # Non triggerare se siamo in modalità assegnazione
             if self.waiting_for_hotkey is not None:
                 logger.debug(f"In modalità assegnazione, ignoro trigger per {clip_name}")
@@ -2854,9 +3557,25 @@ class AudioMixerApp(ctk.CTk):
         """Chiude completamente l'applicazione"""
         print("🛑 Chiusura applicazione...")
         
+        # Salva configurazione PRIMA di fermare qualsiasi cosa
+        try:
+            # Debug: mostra input_device_map prima del salvataggio
+            if hasattr(self, 'pro_mixer'):
+                print(f"   📋 input_device_map al momento della chiusura: {self.pro_mixer.input_device_map}")
+            self.save_config()
+            print("✓ Configurazione salvata prima della chiusura")
+        except Exception as e:
+            print(f"⚠ Errore salvataggio configurazione: {e}")
+            import traceback
+            traceback.print_exc()
+        
         # Ferma mixer
         if hasattr(self, 'mixer'):
             self.mixer.stop()
+        
+        # Ferma ProMixer
+        if hasattr(self, 'pro_mixer'):
+            self.pro_mixer.stop_all()
         
         # Ferma system tray
         if TRAY_AVAILABLE and self.tray_icon is not None:
@@ -2933,11 +3652,24 @@ class AudioMixerApp(ctk.CTk):
             
             # Ripristina dispositivi input
             input_devices = mixer_config.get('input_devices', {})
+            print(f"   📋 input_devices da caricare: {input_devices}")
             for channel_id, device_id in input_devices.items():
                 if channel_id in self.pro_mixer.channels:
                     success = self.pro_mixer.start_input(channel_id, device_id)
                     if success:
                         print(f"   ✓ {channel_id} → Device {device_id}")
+                        # Aggiorna UI del canale
+                        if hasattr(self, 'mixer_channel_strips') and channel_id in self.mixer_channel_strips:
+                            strip = self.mixer_channel_strips[channel_id]
+                            channel = self.pro_mixer.channels[channel_id]
+                            if hasattr(strip, 'name_label'):
+                                strip.name_label.configure(text=channel.name)
+                            # Aggiorna routing buttons
+                            if hasattr(strip, 'routing_buttons'):
+                                from ui.colors import COLORS
+                                for bus_name, btn in strip.routing_buttons.items():
+                                    is_active = channel.routing.get(bus_name, False)
+                                    btn.configure(fg_color=COLORS["accent"] if is_active else COLORS["bg_card"])
             
             # Ripristina dispositivi output
             output_devices = mixer_config.get('output_devices', {})
@@ -2960,6 +3692,27 @@ class AudioMixerApp(ctk.CTk):
             for channel_id, fader_db in channel_volumes.items():
                 if channel_id in self.pro_mixer.channels:
                     self.pro_mixer.channels[channel_id].set_fader_db(fader_db)
+                    # Aggiorna UI del fader
+                    if hasattr(self, 'mixer_channel_strips') and channel_id in self.mixer_channel_strips:
+                        strip = self.mixer_channel_strips[channel_id]
+                        if hasattr(strip, 'fader'):
+                            strip.fader.set(fader_db)
+                        if hasattr(strip, 'db_label'):
+                            strip.db_label.configure(text=f"{fader_db:+.1f} dB")
+            
+            # Ripristina effetti
+            channel_effects = mixer_config.get('channel_effects', {})
+            for channel_id, effects in channel_effects.items():
+                if channel_id in self.pro_mixer.channels:
+                    proc = self.pro_mixer.channels[channel_id].processor
+                    proc.gate_enabled = effects.get('gate_enabled', False)
+                    proc.gate_threshold = effects.get('gate_threshold', -40.0)
+                    proc.comp_enabled = effects.get('comp_enabled', False)
+                    proc.compressor_threshold = effects.get('comp_threshold', -20.0)
+                    proc.compressor_ratio = effects.get('comp_ratio', 4.0)
+                    proc.eq_low = effects.get('eq_low', 0.0)
+                    proc.eq_mid = effects.get('eq_mid', 0.0)
+                    proc.eq_high = effects.get('eq_high', 0.0)
             
             print("✓ Configurazione ProMixer ripristinata")
             
@@ -2996,11 +3749,13 @@ class AudioMixerApp(ctk.CTk):
                     'input_devices': {},  # {channel_id: device_id}
                     'output_devices': {},  # {bus_name: device_id}
                     'channel_routing': {},  # {channel_id: {bus_name: level}}
-                    'channel_volumes': {}  # {channel_id: volume}
+                    'channel_volumes': {},  # {channel_id: volume}
+                    'channel_effects': {}  # {channel_id: effect_settings}
                 }
                 
                 # Salva dispositivi input (usa input_device_map)
                 mixer_config['input_devices'] = self.pro_mixer.input_device_map.copy()
+                print(f"   📝 Salvataggio input_devices: {mixer_config['input_devices']}")
                 
                 # Salva routing e fader
                 for channel_id, channel in self.pro_mixer.channels.items():
@@ -3008,6 +3763,19 @@ class AudioMixerApp(ctk.CTk):
                     mixer_config['channel_routing'][channel_id] = channel.routing.copy()
                     # Salva fader (in dB)
                     mixer_config['channel_volumes'][channel_id] = channel.fader
+                    
+                    # Salva impostazioni effetti
+                    proc = channel.processor
+                    mixer_config['channel_effects'][channel_id] = {
+                        'gate_enabled': proc.gate_enabled,
+                        'gate_threshold': proc.gate_threshold,
+                        'comp_enabled': proc.comp_enabled,
+                        'comp_threshold': proc.compressor_threshold,
+                        'comp_ratio': proc.compressor_ratio,
+                        'eq_low': proc.eq_low,
+                        'eq_mid': proc.eq_mid,
+                        'eq_high': proc.eq_high
+                    }
                 
                 # Salva dispositivi output
                 for bus_name, bus in self.pro_mixer.buses.items():
@@ -3053,6 +3821,10 @@ class AudioMixerApp(ctk.CTk):
                         # Crea clip
                         clip = AudioClip(file_path, clip_name, target_sample_rate=self.mixer.sample_rate)
                         clip.volume = clip_data.get('volume', 1.0)
+                        
+                        # Applica stato loop globale se attivo
+                        clip.is_looping = self.loop_enabled
+                        
                         self.mixer.add_clip(clip)
                         
                         # Crea widget
@@ -3147,6 +3919,9 @@ class AudioMixerApp(ctk.CTk):
             except Exception as e:
                 print(f"Errore nel caricamento configurazione: {e}")
         
+        # Riordina automaticamente le clip dopo il caricamento
+        self.after(100, self.reorder_clips)  # Dopo 100ms per dare tempo alla UI
+        
         # Poi carica tutti i file dalla cartella clips/ non ancora caricati
         clips_dir = self.clips_folder
         if os.path.exists(clips_dir):
@@ -3162,6 +3937,10 @@ class AudioMixerApp(ctk.CTk):
                         try:
                             # Crea clip
                             clip = AudioClip(file_path, filename, target_sample_rate=self.mixer.sample_rate)
+                            
+                            # Applica stato loop globale se attivo
+                            clip.is_looping = self.loop_enabled
+                            
                             self.mixer.add_clip(clip)
                             
                             # Crea widget
@@ -3196,9 +3975,8 @@ class AudioMixerApp(ctk.CTk):
         # Aggiorna la visibilità delle clip in base alla pagina corrente
         self.update_clips_visibility()
         
-        # Salva la configurazione aggiornata (include i nuovi file dalla cartella clips)
-        if len(self.clip_widgets) > 0:
-            self.save_config()
+        # NON salvare qui - sovrascrive input_devices prima del restore!
+        # Il salvataggio verrà fatto dopo restore_promixer_config()
         
         # Aggiorna lista clip nel mixer
         self.update_mixer_clips_list()

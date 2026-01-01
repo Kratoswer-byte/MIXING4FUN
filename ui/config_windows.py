@@ -128,6 +128,22 @@ class MixerConfigWindow(ctk.CTkToplevel):
             command=lambda val, ch=channel_id: self.assign_input(ch, val)
         )
         dropdown.pack(side="right", padx=15, pady=12)
+        
+        # Salva riferimento al dropdown
+        if not hasattr(self, 'input_dropdowns'):
+            self.input_dropdowns = {}
+        self.input_dropdowns[channel_id] = dropdown
+        
+        # Imposta valore iniziale se il canale ha già un device configurato
+        if channel_id in self.pro_mixer.input_device_map:
+            device_id = self.pro_mixer.input_device_map[channel_id]
+            # Trova il device nella lista
+            for device in self.devices:
+                if device.id == device_id and device.input_channels > 0:
+                    device_str = f"[{device.id}] {device.name}"
+                    dropdown.set(device_str)
+                    print(f"✓ Canale {channel_id} preconfigurato: Device {device_id} ({device.name})")
+                    break
     
     def create_output_config(self, parent, bus_name):
         """Crea configurazione per output bus"""
@@ -176,16 +192,21 @@ class MixerConfigWindow(ctk.CTkToplevel):
     def assign_input(self, channel_id, device_str):
         """Assegna device a input"""
         if device_str == "None":
+            print(f"⚠ Rimozione dispositivo da {channel_id}")
+            # TODO: Implementare rimozione device
             return
         
         try:
             # Estrai ID
             device_id = int(device_str.split("]")[0].replace("[", ""))
+            print(f"🎤 Configurazione {channel_id} con device {device_id}...")
             
             # Avvia input
             success = self.pro_mixer.start_input(channel_id, device_id)
             
             if success:
+                print(f"   ✓ Input {channel_id} avviato con successo")
+                
                 # Aggiorna UI dei routing buttons se esistono
                 if hasattr(self.parent, 'mixer_channel_strips') and channel_id in self.parent.mixer_channel_strips:
                     strip = self.parent.mixer_channel_strips[channel_id]
@@ -200,21 +221,33 @@ class MixerConfigWindow(ctk.CTkToplevel):
                 if hasattr(self.parent, 'mixer_channel_strips') and channel_id in self.parent.mixer_channel_strips:
                     strip = self.parent.mixer_channel_strips[channel_id]
                     if hasattr(strip, 'fader'):
-                        strip.fader.set(0.0)  # Unity gain
+                        strip.fader.set(12.0)  # +12 dB per microfono
                     if hasattr(strip, 'db_label'):
-                        strip.db_label.configure(text="0.0 dB")
+                        strip.db_label.configure(text="+12.0 dB")
+                    # Aggiorna nome canale con nome device
+                    if hasattr(strip, 'name_label'):
+                        channel = self.pro_mixer.channels[channel_id]
+                        strip.name_label.configure(text=channel.name)
+                        print(f"   ✓ Nome UI aggiornato: {channel.name}")
                 
                 # Salva configurazione
                 self.parent.save_config()
+                print(f"   ✓ Configurazione salvata")
                 
+                # Messaggio di conferma
                 msg = f"{channel_id} collegato al dispositivo {device_id}\n\n"
-                msg += "✓ Routing automatico attivato verso A1 e A2\n"
-                msg += "✓ Fader impostato a 0 dB"
+                msg += "✓ Routing automatico attivato verso A1 (Output principale)\n"
+                msg += "✓ Fader impostato a +12 dB (puoi abbassarlo se necessario)\n\n"
+                msg += "IMPORTANTE: La configurazione è stata salvata automaticamente."
                 messagebox.showinfo("✓ Configurato", msg)
             else:
-                messagebox.showerror("✗ Errore", "Impossibile avviare input")
+                print(f"   ✗ Errore avvio input {channel_id}")
+                messagebox.showerror("✗ Errore", f"Impossibile avviare input su {channel_id}\nVerifica che il dispositivo sia disponibile.")
         except Exception as e:
-            messagebox.showerror("Errore", str(e))
+            print(f"   ✗ Eccezione durante configurazione: {e}")
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Errore", f"Errore durante la configurazione:\n{str(e)}")
     
     def assign_output(self, bus_name, device_str):
         """Assegna device a bus"""

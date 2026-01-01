@@ -95,10 +95,11 @@ class AudioClip:
             # Aggiorna posizione per questo stream
             self.positions[stream_id] = end_pos
             
-            # Gestisci looping
+            # Gestisci looping - controlla PRIMA di fermare
             if self.positions[stream_id] >= len(self.samples):
                 if self.is_looping:
                     self.positions[stream_id] = 0
+                    # Continua a suonare
                 else:
                     self.is_playing = False
             
@@ -147,7 +148,7 @@ class AudioMixer:
         self.buffer_size = buffer_size
         self.virtual_output_callback = virtual_output_callback  # Callback per ProMixer
         self.clips: Dict[str, AudioClip] = {}
-        self.master_volume = 1.0
+        self.master_volume = 1.0  # Volume massimo (100%)
         self.secondary_volume = 1.0  # Volume separato per bus secondari (A2+)
         self.is_recording = False
         self.recorded_frames = []
