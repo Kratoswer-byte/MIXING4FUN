@@ -185,6 +185,9 @@ class AudioMixerApp(ctk.CTk):
         # Recording state
         self.is_recording = False
         
+        # Flag per refresh libreria
+        self._library_needs_refresh = False
+        
         # YouTube Downloader
         self.youtube_downloader = YouTubeDownloader(self, self._add_downloaded_clip, COLORS, self.clips_folder, self.youtube_folder)
         
@@ -206,15 +209,19 @@ class AudioMixerApp(ctk.CTk):
         # Tab 2: YouTube Downloader
         self.tab_youtube = self.tabview.add("📥 YouTube")
         
-        # Tab 3: Mixer Professionale
+        # Tab 3: Libreria
+        self.tab_library = self.tabview.add("📚 Libreria")
+        
+        # Tab 4: Mixer Professionale
         self.tab_mixer = self.tabview.add("🎛️ Mixer")
         
-        # Tab 4: Impostazioni Audio
+        # Tab 5: Impostazioni Audio
         self.tab_audio_settings = self.tabview.add("🔊 Audio")
         
         self.create_sidebar()
         self.create_soundboard_tab()
         self.youtube_downloader.create_youtube_tab(self.tab_youtube)
+        self.youtube_downloader.create_library_tab(self.tab_library)
         self.create_mixer_tab()
         self.create_audio_settings_tab()
         self.create_control_panel()
@@ -2073,7 +2080,7 @@ class AudioMixerApp(ctk.CTk):
         
         self.yt_format_menu = ctk.CTkOptionMenu(
             url_container,
-            values=["WAV", "MP3"],
+            values=["MP3", "WAV"],
             width=80,
             height=35,
             fg_color=COLORS["bg_card"],
@@ -2081,7 +2088,7 @@ class AudioMixerApp(ctk.CTk):
             button_hover_color=COLORS["accent_hover"],
             font=ctk.CTkFont(size=12, weight="bold")
         )
-        self.yt_format_menu.set("WAV")
+        self.yt_format_menu.set("MP3")
         self.yt_format_menu.pack(side="left", padx=5)
         
         self.yt_load_btn = ctk.CTkButton(
@@ -2754,9 +2761,6 @@ class AudioMixerApp(ctk.CTk):
             self.media_player_playing = False
             self._media_debug_printed = False  # Reset flag debug
             
-            print(f"✅ Audio caricato: {len(audio_data)} samples @ {target_sr}Hz")
-            print(f"   Durata: {len(audio_data) / target_sr:.2f} secondi")
-            
             # Aggiorna UI
             duration_sec = self.media_player_duration / sr
             duration_str = f"{int(duration_sec // 60)}:{int(duration_sec % 60):02d}"
@@ -2780,9 +2784,6 @@ class AudioMixerApp(ctk.CTk):
         if hw3_channel:
             hw3_channel.channel_type = 'python'  # Imposta come canale Python
             hw3_channel.audio_callback = self._media_player_callback
-            
-            print(f"✅ Media Player configurato su HW3")
-            print(f"   Usa i pulsanti routing del canale HW3 per scegliere l'uscita")
     
     def _media_player_callback(self, frames, bus_name=None):
         """Callback che fornisce audio al canale HW3
@@ -2833,14 +2834,6 @@ class AudioMixerApp(ctk.CTk):
             
             # Avanza posizione per questo bus
             self._media_positions[bus_name] = end
-            
-            # Log ogni secondo (solo per il primo bus)
-            if bus_name == 'A1' or (bus_name and len(self._media_positions) == 1):
-                if not hasattr(self, '_last_log_pos'):
-                    self._last_log_pos = 0
-                if start - self._last_log_pos >= 48000:
-                    print(f"🎵 Playing [{bus_name}]: {start/48000:.1f}s / {self.media_player_duration/48000:.1f}s | Volume: {volume*100:.0f}%")
-                    self._last_log_pos = start
             
             return audio
         except Exception as e:
@@ -2928,25 +2921,32 @@ class AudioMixerApp(ctk.CTk):
                 # Verifica quale file è stato effettivamente creato
                 # yt_dlp potrebbe aver aggiunto l'estensione
                 import time
-                time.sleep(0.5)  # Aspetta che il file sia scritto
+                time.sleep(1.5)  # Aspetta che il file sia completamente scritto
                 
                 actual_file = output_file
                 if not os.path.exists(output_file):
                     # Prova con estensione aggiunta da yt_dlp
-                    if os.path.exists(output_file + '.wav'):
-                        actual_file = output_file + '.wav'
+                    if os.path.exists(output_file + f'.{selected_format}'):
+                        actual_file = output_file + f'.{selected_format}'
                     else:
-                        # Cerca il file più recente nella cartella
+                        # Cerca il file più recente nella cartella con il formato selezionato
                         files = [os.path.join(self.youtube_folder, f) for f in os.listdir(self.youtube_folder) 
-                                if f.lower().endswith('.wav')]
+                                if f.lower().endswith(f'.{selected_format}')]
                         if files:
                             actual_file = max(files, key=os.path.getctime)
                 
-                # Aggiorna libreria
-                self.after(0, lambda: self.youtube_downloader._refresh_library())
+                # Verifica che il file esista effettivamente
+                if not os.path.exists(actual_file):
+                    raise Exception(f"File non trovato dopo il download: {actual_file}")
+                
+                print(f"✅ Download completato: {os.path.basename(actual_file)}")
                 
                 # Carica nel media player
                 self.after(0, lambda: self._load_media_file(actual_file, title))
+                
+                # REFRESH LIBRERIA: schedula nel thread principale usando un flag
+                self._library_needs_refresh = True
+                
                 self.after(0, lambda: self.yt_load_btn.configure(state="normal", text="📥 YouTube"))
                 
             except Exception as e:
@@ -2968,9 +2968,6 @@ class AudioMixerApp(ctk.CTk):
             hw3_channel = self.pro_mixer.channels.get('HW3')
             if hw3_channel:
                 active_routes = [bus for bus, enabled in hw3_channel.routing.items() if enabled]
-                print(f"▶️ Media Player START")
-                print(f"   Audio: {self.media_player_duration/48000:.1f}s @ 48kHz")
-                print(f"   HW3 Routing: {active_routes if active_routes else 'NESSUNO ATTIVO!'}")
                 
                 if not active_routes:
                     messagebox.showwarning(
@@ -2980,7 +2977,6 @@ class AudioMixerApp(ctk.CTk):
                     )
                     return
             else:
-                print(f"❌ Canale HW3 non trovato!")
                 return
             
             self.media_player_playing = True
@@ -3034,6 +3030,17 @@ class AudioMixerApp(ctk.CTk):
     
     def update_media_progress(self):
         """Aggiorna progress bar del media player"""
+        # Controlla se serve refresh della libreria
+        if hasattr(self, '_library_needs_refresh') and self._library_needs_refresh:
+            self._library_needs_refresh = False
+            try:
+                print(f"🔄 Refresh automatico libreria...")
+                self.youtube_downloader._load_youtube_library()
+                self.youtube_downloader._update_library_ui()
+                print(f"✅ Libreria aggiornata! File: {len(self.youtube_downloader.youtube_library)}")
+            except Exception as e:
+                print(f"❌ Errore refresh libreria: {e}")
+        
         # Aggiorna UI
         if self.media_player_audio is not None and self.media_player_duration > 0:
             # Usa la posizione media di tutti i bus attivi

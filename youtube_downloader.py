@@ -3,7 +3,7 @@ YouTube Downloader Module - Sistema completo integrato per scaricare e tagliare 
 con anteprima waveform e selezione visuale
 """
 import customtkinter as ctk
-from tkinter import messagebox, Canvas
+from tkinter import messagebox, Canvas, Menu, filedialog, simpledialog
 import os
 import tempfile
 import soundfile as sf
@@ -12,6 +12,7 @@ import numpy as np
 from threading import Thread
 import time
 import subprocess
+import shutil
 
 try:
     import yt_dlp
@@ -37,6 +38,15 @@ class YouTubeDownloader:
         # Libreria file YouTube scaricati
         self.youtube_library = []
         self._load_youtube_library()
+        self.search_filter = ""  # Filtro ricerca
+        
+        # Drag and Drop
+        self.drag_data = None  # {'path': path, 'name': name, 'is_folder': bool, 'widget': widget}
+        self.drag_start_pos = None
+        self.drop_target = None
+        self.current_hover_folder = None  # (folder_path, frame_widget) quando mouse sopra cartella
+        self.highlighted_widget = None  # Widget attualmente evidenziato
+        self.drag_check_job = None  # Job per controllo periodico posizione mouse
         
         # Stato audio
         self.audio_data = None
@@ -131,14 +141,11 @@ class YouTubeDownloader:
         # Header
         header = ctk.CTkLabel(
             main_frame,
-            text="🎬 Download & Taglia Clip da YouTube",
+            text="🎬 Download da YouTube",
             font=ctk.CTkFont(size=24, weight="bold"),
             text_color=self.colors["accent"]
         )
         header.pack(pady=(0, 20))
-        
-        # Libreria YouTube (in alto)
-        self._create_library_section(main_frame)
         
         # Sezione Download
         download_frame = ctk.CTkFrame(main_frame, fg_color=self.colors["bg_card"], corner_radius=10)
@@ -203,6 +210,105 @@ class YouTubeDownloader:
         
         self._create_preview_section()
     
+    def create_library_tab(self, parent):
+        """Crea la tab dedicata alla libreria con navigazione"""
+        # Frame principale che occupa tutto lo spazio
+        main_frame = ctk.CTkFrame(parent, fg_color=self.colors["bg_primary"])
+        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # Header
+        header_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        header_frame.pack(fill="x", pady=(0, 15))
+        
+        ctk.CTkLabel(
+            header_frame,
+            text="📚 Libreria YouTube",
+            font=ctk.CTkFont(size=24, weight="bold"),
+            text_color=self.colors["accent"]
+        ).pack(side="left")
+        
+        # Pulsante cambia cartella
+        ctk.CTkButton(
+            header_frame,
+            text="📁 Cambia Cartella",
+            width=140,
+            height=35,
+            command=self._change_youtube_folder,
+            fg_color=self.colors["accent"],
+            hover_color=self.colors["accent_hover"]
+        ).pack(side="right", padx=5)
+        
+        # Pulsante refresh
+        ctk.CTkButton(
+            header_frame,
+            text="🔄 Aggiorna",
+            width=100,
+            height=35,
+            command=self._refresh_library,
+            fg_color=self.colors["bg_secondary"],
+            hover_color=self.colors["bg_card"]
+        ).pack(side="right")
+        
+        # Pulsante crea cartella
+        ctk.CTkButton(
+            header_frame,
+            text="📁+ Nuova Cartella",
+            width=140,
+            height=35,
+            command=self._create_new_folder,
+            fg_color=self.colors["success"],
+            hover_color="#059669"
+        ).pack(side="right", padx=5)
+        
+        # Barra di ricerca
+        search_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        search_frame.pack(fill="x", pady=(0, 10))
+        
+        ctk.CTkLabel(
+            search_frame,
+            text="🔍",
+            font=ctk.CTkFont(size=16)
+        ).pack(side="left", padx=(0, 5))
+        
+        self.search_entry = ctk.CTkEntry(
+            search_frame,
+            placeholder_text="Cerca file o cartelle...",
+            height=35,
+            font=ctk.CTkFont(size=12)
+        )
+        self.search_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        self.search_entry.bind("<KeyRelease>", self._on_search_changed)
+        
+        ctk.CTkButton(
+            search_frame,
+            text="✖️",
+            width=35,
+            height=35,
+            command=self._clear_search,
+            fg_color=self.colors["bg_secondary"],
+            hover_color=self.colors["bg_card"]
+        ).pack(side="left")
+        
+        # Info cartella corrente
+        self.library_folder_label_tab = ctk.CTkLabel(
+            main_frame,
+            text=f"📂 Cartella: {self.youtube_folder}",
+            font=ctk.CTkFont(size=11),
+            text_color=self.colors["text_muted"]
+        )
+        self.library_folder_label_tab.pack(pady=(0, 10), anchor="w")
+        
+        # Lista file scrollabile che occupa tutto lo spazio disponibile
+        list_container = ctk.CTkScrollableFrame(
+            main_frame, 
+            fg_color=self.colors["bg_secondary"],
+            corner_radius=10
+        )
+        list_container.pack(fill="both", expand=True)
+        
+        self.library_list_frame_tab = list_container
+        self._update_library_ui()
+    
     def _create_library_section(self, parent):
         """Crea sezione libreria YouTube"""
         library_frame = ctk.CTkFrame(parent, fg_color=self.colors["bg_card"], corner_radius=10)
@@ -254,7 +360,7 @@ class YouTubeDownloader:
         list_container = ctk.CTkScrollableFrame(library_frame, height=150, fg_color=self.colors["bg_primary"])
         list_container.pack(fill="both", expand=True, padx=15, pady=(5, 15))
         
-        self.library_list_frame = list_container
+        self.library_list_frame_youtube = list_container
         self._update_library_ui()
     
     def create_library_in_mixer(self, parent, row):
@@ -360,73 +466,576 @@ class YouTubeDownloader:
         folder_label.pack(padx=10, pady=(0, 3), anchor="w")
         self.library_folder_label = folder_label
         
-        # Lista file compatta
+        # Lista file compatta con navigazione
         list_container = ctk.CTkScrollableFrame(library_frame, height=100, fg_color=self.colors["bg_primary"])
         list_container.pack(fill="both", expand=True, padx=10, pady=(5, 10))
         
-        self.library_list_frame = list_container
+        self.library_list_frame_sidebar = list_container
+        self.current_folder = self.youtube_folder  # Cartella corrente
         self._update_library_ui()
+        
+        # Avvia auto-refresh periodico ogni 5 secondi
+        self._start_auto_refresh()
+    
+    def _start_auto_refresh(self):
+        """Avvia controllo periodico per nuovi file"""
+        def check_updates():
+            old_count = len(self.youtube_library)
+            self._load_youtube_library()
+            new_count = len(self.youtube_library)
+            if old_count != new_count:
+                self._update_library_ui()
+            # Richiama dopo 5 secondi
+            self.parent.after(5000, check_updates)
+        
+        # Avvia il primo controllo dopo 5 secondi
+        self.parent.after(5000, check_updates)
     
     def _update_library_ui(self):
-        """Aggiorna UI della libreria"""
-        # Pulisci lista
-        for widget in self.library_list_frame.winfo_children():
-            widget.destroy()
+        """Aggiorna UI della libreria - aggiorna TUTTE le liste"""
+        # Aggiorna lista Tab dedicata (con navigazione completa)
+        if hasattr(self, 'library_list_frame_tab') and self.library_list_frame_tab:
+            self._update_single_library_ui(self.library_list_frame_tab, compact=False, show_navigation=True)
         
-        if not self.youtube_library:
+        # Aggiorna lista YouTube (vecchia, senza navigazione)
+        if hasattr(self, 'library_list_frame_youtube') and self.library_list_frame_youtube:
+            self._update_single_library_ui(self.library_list_frame_youtube, compact=False)
+        
+        # Aggiorna lista Sidebar (compatta con navigazione)
+        if hasattr(self, 'library_list_frame_sidebar') and self.library_list_frame_sidebar:
+            self._update_single_library_ui(self.library_list_frame_sidebar, compact=True, show_navigation=True)
+    
+    def _update_single_library_ui(self, list_frame, compact=False, show_navigation=False):
+        """Aggiorna una singola lista libreria"""
+        if list_frame is None:
+            return
+        
+        # Pulisci lista
+        try:
+            for widget in list_frame.winfo_children():
+                widget.destroy()
+        except:
+            pass
+        
+        # Determina quale cartella mostrare
+        if show_navigation and hasattr(self, 'current_folder'):
+            folder_to_show = self.current_folder
+        else:
+            folder_to_show = self.youtube_folder
+        
+        # Navigazione stile Windows (solo per sidebar)
+        if show_navigation:
+            nav_frame = ctk.CTkFrame(list_frame, fg_color=self.colors["bg_secondary"])
+            nav_frame.pack(fill="x", pady=(0, 5), padx=2)
+            
+            # Pulsante UP (cartella padre)
+            parent_folder = os.path.dirname(folder_to_show)
+            if parent_folder and os.path.exists(parent_folder):
+                ctk.CTkButton(
+                    nav_frame,
+                    text="⬆️",
+                    width=30,
+                    height=25,
+                    command=self._navigate_up,
+                    fg_color=self.colors["accent"],
+                    hover_color=self.colors["accent_hover"]
+                ).pack(side="left", padx=2, pady=2)
+            
+            # Percorso corrente (troncato)
+            path_text = os.path.basename(folder_to_show) or folder_to_show
+            if len(path_text) > 20:
+                path_text = path_text[:18] + "..."
+            
             ctk.CTkLabel(
-                self.library_list_frame,
-                text="Nessun file scaricato",
+                nav_frame,
+                text=f"📂 {path_text}",
+                font=ctk.CTkFont(size=9, weight="bold")
+            ).pack(side="left", padx=5, pady=2)
+        
+        # Lista file e cartelle
+        if not os.path.exists(folder_to_show):
+            ctk.CTkLabel(
+                list_frame,
+                text="Cartella non trovata",
                 text_color=self.colors["text_muted"]
             ).pack(pady=20)
             return
         
-        # Mostra file
-        for item in self.youtube_library:
-            item_frame = ctk.CTkFrame(self.library_list_frame, fg_color=self.colors["bg_card"], corner_radius=5)
-            item_frame.pack(fill="x", pady=2, padx=5)
-            
-            # Info
-            info_frame = ctk.CTkFrame(item_frame, fg_color="transparent")
-            info_frame.pack(side="left", fill="x", expand=True, padx=10, pady=5)
-            
+        items = []
+        try:
+            for item_name in os.listdir(folder_to_show):
+                # Applica filtro ricerca
+                if self.search_filter and self.search_filter.lower() not in item_name.lower():
+                    continue
+                
+                item_path = os.path.join(folder_to_show, item_name)
+                if os.path.isdir(item_path):
+                    items.append({'type': 'folder', 'name': item_name, 'path': item_path})
+                elif item_name.lower().endswith(('.mp3', '.wav', '.flac', '.ogg', '.m4a')):
+                    items.append({
+                        'type': 'file',
+                        'name': item_name,
+                        'path': item_path,
+                        'size': os.path.getsize(item_path)
+                    })
+        except Exception as e:
             ctk.CTkLabel(
-                info_frame,
-                text=item['name'],
-                font=ctk.CTkFont(size=11),
-                anchor="w"
-            ).pack(anchor="w")
-            
-            size_mb = item['size'] / (1024 * 1024)
+                list_frame,
+                text=f"Errore lettura: {str(e)[:30]}",
+                text_color=self.colors["text_muted"]
+            ).pack(pady=20)
+            return
+        
+        # Ordina: cartelle prima, poi file alfabeticamente
+        items.sort(key=lambda x: (x['type'] != 'folder', x['name'].lower()))
+        
+        if not items:
             ctk.CTkLabel(
-                info_frame,
-                text=f"Dimensione: {size_mb:.2f} MB",
-                font=ctk.CTkFont(size=9),
-                text_color=self.colors["text_muted"],
-                anchor="w"
-            ).pack(anchor="w")
+                list_frame,
+                text="Cartella vuota",
+                text_color=self.colors["text_muted"]
+            ).pack(pady=20)
+            return
+        
+        # Mostra cartelle e file
+        for item in items:
+            item_frame = ctk.CTkFrame(list_frame, fg_color=self.colors["bg_card"], corner_radius=3)
+            item_frame.pack(fill="x", pady=1, padx=2)
+            item_frame.grid_columnconfigure(0, weight=1)
             
-            # Pulsanti
-            btn_frame = ctk.CTkFrame(item_frame, fg_color="transparent")
-            btn_frame.pack(side="right", padx=5)
+            if item['type'] == 'folder':
+                # CARTELLA
+                info_frame = ctk.CTkFrame(item_frame, fg_color="transparent")
+                info_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=3)
+                
+                display_name = item['name']
+                if len(display_name) > 25:
+                    display_name = display_name[:22] + "..."
+                
+                folder_label = ctk.CTkLabel(
+                    info_frame,
+                    text=f"📁 {display_name}",
+                    font=ctk.CTkFont(size=10 if compact else 11, weight="bold"),
+                    anchor="w"
+                )
+                folder_label.pack(anchor="w")
+                
+                # Marca questo frame come drop target per drag & drop
+                item_frame._folder_drop_path = item['path']
+                
+                # Menu contestuale cartella
+                folder_label.bind("<Button-3>", lambda e, p=item['path'], n=item['name']: self._show_folder_context_menu(e, p, n))
+                
+                # Drag and Drop - Cartella come DRAGGABLE (con parametri default per catturare valore)
+                folder_label.bind("<ButtonPress-1>", lambda e, p=item['path'], n=item['name'], isf=True, w=item_frame: self._on_drag_start(e, p, n, isf, w))
+                folder_label.bind("<ButtonRelease-1>", lambda e: self._on_drag_release(e))
+                
+                # Pulsante entra (solo se navigazione attiva)
+                if show_navigation:
+                    ctk.CTkButton(
+                        item_frame,
+                        text="➡️",
+                        width=25,
+                        height=22,
+                        command=lambda p=item['path']: self._navigate_into(p),
+                        fg_color=self.colors["accent"],
+                        hover_color=self.colors["accent_hover"]
+                    ).grid(row=0, column=1, padx=3, pady=3)
+            else:
+                # FILE AUDIO
+                info_frame = ctk.CTkFrame(item_frame, fg_color="transparent")
+                info_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=3)
+                
+                display_name = item['name']
+                if len(display_name) > (25 if compact else 35):
+                    display_name = display_name[:(22 if compact else 32)] + "..."
+                
+                file_label = ctk.CTkLabel(
+                    info_frame,
+                    text=display_name,
+                    font=ctk.CTkFont(size=9 if compact else 11),
+                    anchor="w"
+                )
+                file_label.pack(anchor="w")
+                
+                # Menu contestuale file
+                file_label.bind("<Button-3>", lambda e, p=item['path'], n=item['name']: self._show_file_context_menu(e, p, n))
+                
+                # Drag and Drop - File come DRAGGABLE (con parametri default per catturare valore)
+                file_label.bind("<ButtonPress-1>", lambda e, p=item['path'], n=item['name'], isf=False, w=item_frame: self._on_drag_start(e, p, n, isf, w))
+                file_label.bind("<ButtonRelease-1>", lambda e: self._on_drag_release(e))
+                
+                if not compact:
+                    size_mb = item['size'] / (1024 * 1024)
+                    ctk.CTkLabel(
+                        info_frame,
+                        text=f"{size_mb:.1f} MB",
+                        font=ctk.CTkFont(size=8),
+                        text_color=self.colors["text_muted"],
+                        anchor="w"
+                    ).pack(anchor="w")
+                
+                # Pulsanti azione
+                btn_frame = ctk.CTkFrame(item_frame, fg_color="transparent")
+                btn_frame.grid(row=0, column=1, padx=3, pady=3)
+                
+                ctk.CTkButton(
+                    btn_frame,
+                    text="▶️",
+                    width=25 if compact else 35,
+                    height=22,
+                    command=lambda p=item['path'], n=item['name']: self._load_from_library(p, n),
+                    fg_color=self.colors["success"],
+                    hover_color="#059669"
+                ).pack(side="left", padx=1)
+                
+                ctk.CTkButton(
+                    btn_frame,
+                    text="🗑️",
+                    width=25,
+                    height=22,
+                    command=lambda p=item['path']: self._delete_from_library(p),
+                    fg_color=self.colors["danger"],
+                    hover_color="#b91c1c"
+                ).pack(side="left", padx=1)
+        
+        # Forza rendering
+        try:
+            list_frame.update_idletasks()
+        except:
+            pass
+    
+    def _navigate_up(self):
+        """Naviga alla cartella padre"""
+        if hasattr(self, 'current_folder'):
+            parent = os.path.dirname(self.current_folder)
+            if parent and os.path.exists(parent):
+                self.current_folder = parent
+                # Aggiorna label percorso
+                if hasattr(self, 'library_folder_label_tab'):
+                    self.library_folder_label_tab.configure(text=f"📂 Cartella: {self.current_folder}")
+                self._update_library_ui()
+    
+    def _navigate_into(self, folder_path):
+        """Naviga dentro una cartella"""
+        if os.path.exists(folder_path) and os.path.isdir(folder_path):
+            self.current_folder = folder_path
+            # Aggiorna label percorso
+            if hasattr(self, 'library_folder_label_tab'):
+                self.library_folder_label_tab.configure(text=f"📂 Cartella: {self.current_folder}")
+            self._update_library_ui()
+    
+    def _on_search_changed(self, event=None):
+        """Gestisce cambio ricerca"""
+        if hasattr(self, 'search_entry'):
+            self.search_filter = self.search_entry.get().strip()
+            self._update_library_ui()
+    
+    def _clear_search(self):
+        """Pulisce ricerca"""
+        if hasattr(self, 'search_entry'):
+            self.search_entry.delete(0, 'end')
+            self.search_filter = ""
+            self._update_library_ui()
+    
+    def _create_new_folder(self):
+        """Crea nuova cartella nella posizione corrente"""
+        folder_name = simpledialog.askstring(
+            "Nuova Cartella",
+            "Nome della nuova cartella:",
+            parent=self.parent
+        )
+        if folder_name:
+            current = self.current_folder if hasattr(self, 'current_folder') else self.youtube_folder
+            new_path = os.path.join(current, folder_name)
+            try:
+                os.makedirs(new_path, exist_ok=True)
+                messagebox.showinfo("✓ Successo", f"Cartella '{folder_name}' creata!")
+                self._update_library_ui()
+            except Exception as e:
+                messagebox.showerror("Errore", f"Impossibile creare cartella: {str(e)}")
+    
+    def _show_folder_context_menu(self, event, folder_path, folder_name):
+        """Mostra menu contestuale cartella"""
+        menu = Menu(self.parent, tearoff=0)
+        menu.add_command(label="📂 Apri", command=lambda: self._navigate_into(folder_path))
+        menu.add_command(label="📂 Apri in Esplora File", command=lambda: self._open_in_explorer(folder_path))
+        menu.add_separator()
+        menu.add_command(label="✏️ Rinomina", command=lambda: self._rename_item(folder_path, folder_name, is_folder=True))
+        menu.add_command(label="🗑️ Elimina", command=lambda: self._delete_folder(folder_path, folder_name))
+        menu.add_separator()
+        menu.add_command(label="ℹ️ Proprietà", command=lambda: self._show_properties(folder_path, is_folder=True))
+        menu.tk_popup(event.x_root, event.y_root)
+    
+    def _show_file_context_menu(self, event, file_path, file_name):
+        """Mostra menu contestuale file"""
+        menu = Menu(self.parent, tearoff=0)
+        menu.add_command(label="▶️ Carica", command=lambda: self._load_from_library(file_path, file_name))
+        menu.add_command(label="📂 Apri in Esplora File", command=lambda: self._open_in_explorer(os.path.dirname(file_path)))
+        menu.add_separator()
+        menu.add_command(label="📋 Sposta in...", command=lambda: self._move_file(file_path, file_name))
+        menu.add_command(label="📄 Copia in...", command=lambda: self._copy_file(file_path, file_name))
+        menu.add_separator()
+        menu.add_command(label="✏️ Rinomina", command=lambda: self._rename_item(file_path, file_name, is_folder=False))
+        menu.add_command(label="🗑️ Elimina", command=lambda: self._delete_from_library(file_path))
+        menu.add_separator()
+        menu.add_command(label="ℹ️ Proprietà", command=lambda: self._show_properties(file_path, is_folder=False))
+        menu.tk_popup(event.x_root, event.y_root)
+    
+    def _open_in_explorer(self, path):
+        """Apre percorso in Esplora File"""
+        try:
+            if os.path.isfile(path):
+                subprocess.Popen(f'explorer /select,"{path}"')
+            else:
+                subprocess.Popen(f'explorer "{path}"')
+        except Exception as e:
+            messagebox.showerror("Errore", f"Impossibile aprire: {str(e)}")
+    
+    def _rename_item(self, old_path, old_name, is_folder=False):
+        """Rinomina file o cartella"""
+        new_name = simpledialog.askstring(
+            "Rinomina",
+            f"Nuovo nome per '{old_name}':",
+            initialvalue=old_name,
+            parent=self.parent
+        )
+        if new_name and new_name != old_name:
+            new_path = os.path.join(os.path.dirname(old_path), new_name)
+            try:
+                os.rename(old_path, new_path)
+                messagebox.showinfo("✓ Successo", f"Rinominato in '{new_name}'")
+                self._load_youtube_library()
+                self._update_library_ui()
+            except Exception as e:
+                messagebox.showerror("Errore", f"Impossibile rinominare: {str(e)}")
+    
+    def _move_file(self, file_path, file_name):
+        """Sposta file in altra cartella"""
+        dest_folder = filedialog.askdirectory(
+            title="Seleziona cartella destinazione",
+            initialdir=self.youtube_folder
+        )
+        if dest_folder:
+            dest_path = os.path.join(dest_folder, file_name)
+            try:
+                shutil.move(file_path, dest_path)
+                messagebox.showinfo("✓ Successo", f"File spostato in {dest_folder}")
+                self._load_youtube_library()
+                self._update_library_ui()
+            except Exception as e:
+                messagebox.showerror("Errore", f"Impossibile spostare: {str(e)}")
+    
+    def _copy_file(self, file_path, file_name):
+        """Copia file in altra cartella"""
+        dest_folder = filedialog.askdirectory(
+            title="Seleziona cartella destinazione",
+            initialdir=self.youtube_folder
+        )
+        if dest_folder:
+            dest_path = os.path.join(dest_folder, file_name)
+            try:
+                shutil.copy2(file_path, dest_path)
+                messagebox.showinfo("✓ Successo", f"File copiato in {dest_folder}")
+                self._update_library_ui()
+            except Exception as e:
+                messagebox.showerror("Errore", f"Impossibile copiare: {str(e)}")
+    
+    def _delete_folder(self, folder_path, folder_name):
+        """Elimina cartella"""
+        if messagebox.askyesno("Conferma", f"Eliminare la cartella '{folder_name}' e tutto il suo contenuto?"):
+            try:
+                shutil.rmtree(folder_path)
+                messagebox.showinfo("✓ Successo", "Cartella eliminata")
+                self._load_youtube_library()
+                self._update_library_ui()
+            except Exception as e:
+                messagebox.showerror("Errore", f"Impossibile eliminare: {str(e)}")
+    
+    def _show_properties(self, path, is_folder=False):
+        """Mostra proprietà file/cartella"""
+        try:
+            name = os.path.basename(path)
+            size = 0
+            file_count = 0
             
-            ctk.CTkButton(
-                btn_frame,
-                text="▶️ Carica",
-                width=80,
-                height=25,
-                command=lambda p=item['path'], n=item['name']: self._load_from_library(p, n),
-                fg_color=self.colors["success"]
-            ).pack(side="left", padx=2)
+            if is_folder:
+                # Conta file e dimensione totale
+                for root, dirs, files in os.walk(path):
+                    file_count += len(files)
+                    for f in files:
+                        fp = os.path.join(root, f)
+                        if os.path.exists(fp):
+                            size += os.path.getsize(fp)
+                info = f"📁 Cartella: {name}\n\n"
+                info += f"File contenuti: {file_count}\n"
+                info += f"Dimensione totale: {size / (1024*1024):.2f} MB\n"
+            else:
+                size = os.path.getsize(path)
+                info = f"🎵 File: {name}\n\n"
+                info += f"Dimensione: {size / (1024*1024):.2f} MB\n"
+                
+                # Info audio
+                try:
+                    data, sr = sf.read(path)
+                    duration = len(data) / sr
+                    info += f"Durata: {duration:.1f}s\n"
+                    info += f"Sample Rate: {sr} Hz\n"
+                    info += f"Canali: {data.shape[1] if len(data.shape) > 1 else 1}\n"
+                except:
+                    pass
             
-            ctk.CTkButton(
-                btn_frame,
-                text="🗑️",
-                width=30,
-                height=25,
-                command=lambda p=item['path']: self._delete_from_library(p),
-                fg_color=self.colors["danger"]
-            ).pack(side="left", padx=2)
+            info += f"\nPercorso:\n{path}"
+            messagebox.showinfo("Proprietà", info)
+        except Exception as e:
+            messagebox.showerror("Errore", f"Impossibile leggere proprietà: {str(e)}")
+    
+    def _on_drag_start(self, event, file_path, file_name, is_folder, widget):
+        """Inizia drag operation"""
+        print(f"🖱️ Drag START: {file_name}")
+        self.drag_data = {
+            'path': file_path,
+            'name': file_name,
+            'is_folder': is_folder,
+            'widget': widget
+        }
+        self.drag_start_pos = (event.x, event.y)
+        # Cambia aspetto widget durante drag
+        try:
+            widget.configure(fg_color=self.colors["accent"])
+        except:
+            pass
+        
+        # Avvia controllo periodico posizione mouse
+        self._check_drag_position()
+    
+    def _check_drag_position(self):
+        """Controlla periodicamente la posizione del mouse durante il drag"""
+        if not self.drag_data:
+            return
+        
+        try:
+            # Ottieni widget sotto il mouse
+            x_abs = self.parent.winfo_pointerx()
+            y_abs = self.parent.winfo_pointery()
+            target_widget = self.parent.winfo_containing(x_abs, y_abs)
+            
+            # Cerca attributo _folder_drop_path navigando fino a 10 parent
+            target_folder = None
+            target_frame = None
+            
+            if target_widget:
+                check_widget = target_widget
+                for _ in range(10):
+                    if check_widget is None:
+                        break
+                    
+                    # Controlla se ha l'attributo _folder_drop_path
+                    if hasattr(check_widget, '_folder_drop_path'):
+                        target_folder = check_widget._folder_drop_path
+                        target_frame = check_widget
+                        break
+                    
+                    try:
+                        check_widget = check_widget.master
+                    except:
+                        break
+            
+            # Evidenzia cartella target
+            if target_folder and target_folder != self.drag_data['path']:
+                # Rimuovi evidenziazione precedente
+                if self.highlighted_widget and self.highlighted_widget != target_frame:
+                    try:
+                        self.highlighted_widget.configure(fg_color=self.colors["bg_card"])
+                    except:
+                        pass
+                
+                # Evidenzia nuova cartella
+                self.drop_target = target_folder
+                self.highlighted_widget = target_frame
+                try:
+                    self.highlighted_widget.configure(fg_color=self.colors["success"])
+                except:
+                    pass
+            else:
+                # Nessun target valido, rimuovi evidenziazione
+                if self.highlighted_widget:
+                    try:
+                        self.highlighted_widget.configure(fg_color=self.colors["bg_card"])
+                    except:
+                        pass
+                    self.highlighted_widget = None
+                self.drop_target = None
+            
+            # Richiama dopo 50ms
+            self.drag_check_job = self.parent.after(50, self._check_drag_position)
+        except:
+            pass
+    
+    def _on_drag_motion(self, event):
+        """Durante drag - NON PIU' USATO"""
+        pass
+    
+    def _on_drag_release(self, event):
+        """Fine drag operation"""
+        # Ferma il controllo periodico
+        if self.drag_check_job:
+            try:
+                self.parent.after_cancel(self.drag_check_job)
+            except:
+                pass
+            self.drag_check_job = None
+        
+        print(f"🖱️ Drag RELEASE - Target: {os.path.basename(self.drop_target) if self.drop_target else 'None'}")
+        
+        if self.drag_data:
+            # Ripristina aspetto widget trascinato
+            try:
+                if self.drag_data['widget'].winfo_exists():
+                    self.drag_data['widget'].configure(fg_color=self.colors["bg_card"])
+            except:
+                pass
+            
+            # Ripristina aspetto cartella target
+            if self.highlighted_widget:
+                try:
+                    self.highlighted_widget.configure(fg_color=self.colors["bg_card"])
+                except:
+                    pass
+            
+            # Se c'è un target, sposta il file/cartella
+            if self.drop_target and os.path.exists(self.drop_target):
+                src_path = self.drag_data['path']
+                src_name = self.drag_data['name']
+                dest_path = os.path.join(self.drop_target, src_name)
+                
+                # Evita spostamento su se stesso o dentro se stesso
+                if os.path.dirname(src_path) != self.drop_target and src_path != self.drop_target:
+                    try:
+                        shutil.move(src_path, dest_path)
+                        print(f"✓ '{src_name}' spostato in '{os.path.basename(self.drop_target)}'")
+                        messagebox.showinfo("✓ Drag&Drop", f"'{src_name}' spostato in '{os.path.basename(self.drop_target)}'!")
+                        self._load_youtube_library()
+                        self._update_library_ui()
+                    except Exception as e:
+                        print(f"✗ Errore: {str(e)}")
+                        messagebox.showerror("Errore Drag&Drop", f"Impossibile spostare: {str(e)}")
+                else:
+                    print("⚠️ Spostamento ignorato (stessa cartella o dentro se stesso)")
+            
+            # Reset
+            self.drag_data = None
+            self.drag_start_pos = None
+            self.drop_target = None
+            self.highlighted_widget = None
+    
+    def _on_drag_enter(self, event, folder_path, widget):
+        """Mouse entra su cartella durante drag"""
+        pass  # Non più usato, gestito in _on_drag_motion
+    
+    def _on_drag_leave(self, event, widget):
+        """Mouse esce da cartella"""
+        pass  # Non più usato, gestito in _on_drag_motion
     
     def _change_youtube_folder(self):
         """Cambia cartella YouTube"""
@@ -451,8 +1060,18 @@ class YouTubeDownloader:
     
     def _refresh_library(self):
         """Ricarica libreria"""
+        print(f"🔄 Refresh libreria chiamato...")
         self._load_youtube_library()
-        self._update_library_ui()
+        print(f"   File trovati: {len(self.youtube_library)}")
+        # Forza aggiornamento UI nel thread principale
+        try:
+            if hasattr(self.parent, 'after'):
+                self.parent.after(10, self._update_library_ui)  # Ridotto delay
+            else:
+                self._update_library_ui()
+        except Exception as e:
+            print(f"   Errore refresh: {e}")
+            self._update_library_ui()
     
     def _load_from_library(self, file_path, title):
         """Carica file dalla libreria"""

@@ -2,6 +2,7 @@ Libreria YouTube Debug
 ======================
 Cartella: C:\Users\Francesco_pc\Desktop\MIXING4FUN\youtube_downloads
 Esiste: True
-File totali: 1
+File totali: 2
 File trovati:
-  - GIGI D'AGOSTINO - BLA BLA BLA ( OFFICIAL VIDEO ).wav
+  - Dance
+  - Gigione
