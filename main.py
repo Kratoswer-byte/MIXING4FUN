@@ -63,7 +63,8 @@ class AudioMixerApp(ctk.CTk):
         super().__init__()
         
         self.title("🎮 Gaming Soundboard - Mix Mic + Clip")
-        self.geometry("1600x900")  # Dimensione maggiore per il mixer
+        self.geometry("1920x1200")  # Dimensione maggiore per mostrare tutti i canali del mixer completi
+        self.minsize(1600, 1000)  # Dimensione minima per evitare canali tagliati
         
         # System Tray
         self.tray_icon = None
@@ -376,9 +377,12 @@ class AudioMixerApp(ctk.CTk):
             text_color=COLORS["text_secondary"]
         ).pack(pady=(0, 10))
         
+        # Libreria YouTube
+        self.youtube_downloader.create_library_in_sidebar(self.sidebar, row=7)
+        
         # Info
         info_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        info_frame.grid(row=7, column=0, padx=20, pady=(10, 20), sticky="s")
+        info_frame.grid(row=8, column=0, padx=20, pady=(10, 20), sticky="s")
         
         info = ctk.CTkLabel(
             info_frame,
@@ -395,7 +399,7 @@ class AudioMixerApp(ctk.CTk):
         
         # Selettore pagine soundboard
         pages_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        pages_frame.grid(row=7, column=0, padx=20, pady=20, sticky="ew")
+        pages_frame.grid(row=9, column=0, padx=20, pady=20, sticky="ew")
         
         ctk.CTkLabel(
             pages_frame,
@@ -2060,6 +2064,26 @@ class AudioMixerApp(ctk.CTk):
         )
         self.yt_url_entry.pack(side="left", fill="x", expand=True, padx=5)
         
+        # Selettore formato download
+        ctk.CTkLabel(
+            url_container,
+            text="Formato:",
+            font=ctk.CTkFont(size=11)
+        ).pack(side="left", padx=(10, 5))
+        
+        self.yt_format_menu = ctk.CTkOptionMenu(
+            url_container,
+            values=["WAV", "MP3"],
+            width=80,
+            height=35,
+            fg_color=COLORS["bg_card"],
+            button_color=COLORS["accent"],
+            button_hover_color=COLORS["accent_hover"],
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        self.yt_format_menu.set("WAV")
+        self.yt_format_menu.pack(side="left", padx=5)
+        
         self.yt_load_btn = ctk.CTkButton(
             url_container,
             text="📥 YouTube",
@@ -2852,34 +2876,77 @@ class AudioMixerApp(ctk.CTk):
         self.yt_load_btn.configure(state="disabled", text="⏳ Caricamento...")
         self.yt_status_label.configure(text="⏳ Download audio in corso...")
         
+        # Ottieni formato selezionato
+        selected_format = self.yt_format_menu.get().lower()  # 'wav' o 'mp3'
+        
         def download_thread():
             try:
                 import yt_dlp
-                import tempfile
                 import soundfile as sf
+                import re
                 
-                # Crea temp file
-                temp_audio = os.path.join(tempfile.gettempdir(), "yt_mixer_audio.wav")
+                # Opzioni yt-dlp per ottenere info
+                ydl_opts_info = {
+                    'quiet': True,
+                    'no_warnings': True,
+                }
                 
-                # Opzioni yt-dlp per audio
+                # Ottieni titolo video
+                with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    title = info.get('title', 'YouTube Audio')
+                
+                # Sanitize filename
+                safe_title = re.sub(r'[\\/:*?"<>|]', '', title)
+                safe_title = safe_title[:100]  # Max 100 caratteri
+                
+                # Usa il formato selezionato
+                output_file = os.path.join(self.youtube_folder, f"{safe_title}.{selected_format}")
+                
+                # Se esiste già, aggiungi numero
+                counter = 1
+                while os.path.exists(output_file):
+                    output_file = os.path.join(self.youtube_folder, f"{safe_title}_{counter}.{selected_format}")
+                    counter += 1
+                
+                # Opzioni yt-dlp per download
                 ydl_opts = {
                     'format': 'bestaudio/best',
                     'postprocessors': [{
                         'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'wav',
+                        'preferredcodec': selected_format,
                     }],
-                    'outtmpl': temp_audio.replace('.wav', ''),
+                    'outtmpl': output_file.replace(f'.{selected_format}', ''),
                     'quiet': True,
                     'no_warnings': True,
                 }
                 
                 # Download
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    title = info.get('title', 'YouTube Audio')
+                    ydl.download([url])
                 
-                # Carica come clip
-                self.after(0, lambda: self._load_media_file(temp_audio, title))
+                # Verifica quale file è stato effettivamente creato
+                # yt_dlp potrebbe aver aggiunto l'estensione
+                import time
+                time.sleep(0.5)  # Aspetta che il file sia scritto
+                
+                actual_file = output_file
+                if not os.path.exists(output_file):
+                    # Prova con estensione aggiunta da yt_dlp
+                    if os.path.exists(output_file + '.wav'):
+                        actual_file = output_file + '.wav'
+                    else:
+                        # Cerca il file più recente nella cartella
+                        files = [os.path.join(self.youtube_folder, f) for f in os.listdir(self.youtube_folder) 
+                                if f.lower().endswith('.wav')]
+                        if files:
+                            actual_file = max(files, key=os.path.getctime)
+                
+                # Aggiorna libreria
+                self.after(0, lambda: self.youtube_downloader._refresh_library())
+                
+                # Carica nel media player
+                self.after(0, lambda: self._load_media_file(actual_file, title))
                 self.after(0, lambda: self.yt_load_btn.configure(state="normal", text="📥 YouTube"))
                 
             except Exception as e:

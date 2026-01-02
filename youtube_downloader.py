@@ -81,15 +81,38 @@ class YouTubeDownloader:
     def _load_youtube_library(self):
         """Carica la libreria dei file YouTube scaricati"""
         self.youtube_library = []
+        
+        # Debug per troubleshooting
+        try:
+            with open(os.path.join(os.path.dirname(__file__), "library_debug.txt"), "w", encoding="utf-8") as f:
+                f.write(f"Libreria YouTube Debug\n")
+                f.write(f"======================\n")
+                f.write(f"Cartella: {self.youtube_folder}\n")
+                f.write(f"Esiste: {os.path.exists(self.youtube_folder)}\n")
+                
+                if os.path.exists(self.youtube_folder):
+                    files = os.listdir(self.youtube_folder)
+                    f.write(f"File totali: {len(files)}\n")
+                    f.write(f"File trovati:\n")
+                    for file in files:
+                        f.write(f"  - {file}\n")
+                else:
+                    f.write("Cartella non esiste - creazione...\n")
+        except Exception as e:
+            pass
+        
         if os.path.exists(self.youtube_folder):
             for file in os.listdir(self.youtube_folder):
-                if file.lower().endswith(('.mp3', '.wav')):
+                if file.lower().endswith(('.mp3', '.wav', '.flac', '.ogg', '.m4a')):
                     file_path = os.path.join(self.youtube_folder, file)
                     self.youtube_library.append({
                         'name': file,
                         'path': file_path,
                         'size': os.path.getsize(file_path)
                     })
+        else:
+            os.makedirs(self.youtube_folder, exist_ok=True)
+        
         self.youtube_library.sort(key=lambda x: x['name'])
         self.progress_label = None
         self.waveform_canvas = None
@@ -234,6 +257,116 @@ class YouTubeDownloader:
         self.library_list_frame = list_container
         self._update_library_ui()
     
+    def create_library_in_mixer(self, parent, row):
+        """Crea la libreria YouTube nel tab Mixer usando grid layout"""
+        library_frame = ctk.CTkFrame(parent, fg_color=self.colors["bg_card"], corner_radius=10)
+        library_frame.grid(row=row, column=0, sticky="ew", padx=10, pady=5)
+        
+        # Header con pulsanti
+        header_frame = ctk.CTkFrame(library_frame, fg_color="transparent")
+        header_frame.pack(fill="x", padx=15, pady=(15, 10))
+        
+        ctk.CTkLabel(
+            header_frame,
+            text="📚 Libreria YouTube",
+            font=ctk.CTkFont(size=16, weight="bold")
+        ).pack(side="left")
+        
+        # Pulsante cambia cartella
+        ctk.CTkButton(
+            header_frame,
+            text="📁 Cambia Cartella",
+            width=140,
+            height=30,
+            command=self._change_youtube_folder,
+            fg_color=self.colors["bg_secondary"],
+            hover_color=self.colors["bg_card"]
+        ).pack(side="right", padx=5)
+        
+        # Pulsante refresh
+        ctk.CTkButton(
+            header_frame,
+            text="🔄 Aggiorna",
+            width=100,
+            height=30,
+            command=self._refresh_library,
+            fg_color=self.colors["bg_secondary"],
+            hover_color=self.colors["bg_card"]
+        ).pack(side="right")
+        
+        # Info cartella
+        folder_label = ctk.CTkLabel(
+            library_frame,
+            text=f"📂 Cartella: {self.youtube_folder}",
+            font=ctk.CTkFont(size=10),
+            text_color=self.colors["text_muted"]
+        )
+        folder_label.pack(padx=15, pady=(0, 5), anchor="w")
+        self.library_folder_label = folder_label
+        
+        # Lista file (più compatta per il mixer)
+        list_container = ctk.CTkScrollableFrame(library_frame, height=120, fg_color=self.colors["bg_primary"])
+        list_container.pack(fill="both", expand=True, padx=15, pady=(5, 15))
+        
+        self.library_list_frame = list_container
+        self._update_library_ui()
+    
+    def create_library_in_sidebar(self, parent, row):
+        """Crea la libreria YouTube nella sidebar laterale usando grid layout"""
+        library_frame = ctk.CTkFrame(parent, fg_color=self.colors["bg_card"], corner_radius=10)
+        library_frame.grid(row=row, column=0, padx=20, pady=10, sticky="ew")
+        
+        # Header compatto
+        header_frame = ctk.CTkFrame(library_frame, fg_color="transparent")
+        header_frame.pack(fill="x", padx=10, pady=(10, 5))
+        
+        ctk.CTkLabel(
+            header_frame,
+            text="📚 Libreria YouTube",
+            font=ctk.CTkFont(size=13, weight="bold")
+        ).pack(anchor="w")
+        
+        # Pulsanti compatti
+        buttons_frame = ctk.CTkFrame(library_frame, fg_color="transparent")
+        buttons_frame.pack(fill="x", padx=10, pady=5)
+        
+        ctk.CTkButton(
+            buttons_frame,
+            text="🔄",
+            width=40,
+            height=25,
+            command=self._refresh_library,
+            fg_color=self.colors["bg_secondary"],
+            hover_color=self.colors["bg_card"]
+        ).pack(side="left", padx=2)
+        
+        ctk.CTkButton(
+            buttons_frame,
+            text="📁",
+            width=40,
+            height=25,
+            command=self._change_youtube_folder,
+            fg_color=self.colors["bg_secondary"],
+            hover_color=self.colors["bg_card"]
+        ).pack(side="left", padx=2)
+        
+        # Info cartella (compatta)
+        folder_label = ctk.CTkLabel(
+            library_frame,
+            text=f"📂 {os.path.basename(self.youtube_folder)}",
+            font=ctk.CTkFont(size=9),
+            text_color=self.colors["text_muted"]
+        )
+        folder_label.pack(padx=10, pady=(0, 3), anchor="w")
+        self.library_folder_label = folder_label
+        
+        # Lista file compatta
+        list_container = ctk.CTkScrollableFrame(library_frame, height=100, fg_color=self.colors["bg_primary"])
+        list_container.pack(fill="both", expand=True, padx=10, pady=(5, 10))
+        
+        self.library_list_frame = list_container
+        self._update_library_ui()
+    
     def _update_library_ui(self):
         """Aggiorna UI della libreria"""
         # Pulisci lista
@@ -308,7 +441,12 @@ class YouTubeDownloader:
                 with open(self.parent.config_file, 'w', encoding='utf-8') as f:
                     import json
                     json.dump(config, f, indent=2, ensure_ascii=False)
-            self.library_folder_label.configure(text=f"📂 Cartella: {self.youtube_folder}")
+            # Aggiorna label (basename per sidebar, path completo per altre UI)
+            try:
+                folder_text = f"📂 {os.path.basename(self.youtube_folder)}" if len(self.youtube_folder) > 40 else f"📂 Cartella: {self.youtube_folder}"
+                self.library_folder_label.configure(text=folder_text)
+            except:
+                pass
             self._refresh_library()
     
     def _refresh_library(self):
@@ -318,7 +456,7 @@ class YouTubeDownloader:
     
     def _load_from_library(self, file_path, title):
         """Carica file dalla libreria"""
-        self.parent.after(100, lambda: self._load_media_file(file_path, title))
+        self.parent.after(100, lambda: self.parent._load_media_file(file_path, title))
     
     def _delete_from_library(self, file_path):
         """Elimina file dalla libreria"""
