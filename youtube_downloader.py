@@ -318,7 +318,7 @@ class YouTubeDownloader:
     
     def _load_from_library(self, file_path, title):
         """Carica file dalla libreria"""
-        self.after(100, lambda: self._load_media_file(file_path, title))
+        self.parent.after(100, lambda: self._load_media_file(file_path, title))
     
     def _delete_from_library(self, file_path):
         """Elimina file dalla libreria"""
