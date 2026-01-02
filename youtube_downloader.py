@@ -23,12 +23,20 @@ except ImportError:
 class YouTubeDownloader:
     """Gestisce il download da YouTube con anteprima e taglio integrati"""
     
-    def __init__(self, parent, on_download_complete, colors, clips_folder=None):
+    def __init__(self, parent, on_download_complete, colors, clips_folder=None, youtube_folder=None):
         self.parent = parent
         self.on_download_complete = on_download_complete
         self.colors = colors
         self.is_downloading = False
         self.clips_folder = clips_folder or os.path.join(os.path.dirname(__file__), "clips")
+        self.youtube_folder = youtube_folder or os.path.join(os.path.dirname(__file__), "youtube_downloads")
+        
+        # Crea cartella YouTube se non esiste
+        os.makedirs(self.youtube_folder, exist_ok=True)
+        
+        # Libreria file YouTube scaricati
+        self.youtube_library = []
+        self._load_youtube_library()
         
         # Stato audio
         self.audio_data = None
@@ -69,6 +77,20 @@ class YouTubeDownloader:
                 return float(time_str)
         except:
             return 0
+    
+    def _load_youtube_library(self):
+        """Carica la libreria dei file YouTube scaricati"""
+        self.youtube_library = []
+        if os.path.exists(self.youtube_folder):
+            for file in os.listdir(self.youtube_folder):
+                if file.lower().endswith(('.mp3', '.wav')):
+                    file_path = os.path.join(self.youtube_folder, file)
+                    self.youtube_library.append({
+                        'name': file,
+                        'path': file_path,
+                        'size': os.path.getsize(file_path)
+                    })
+        self.youtube_library.sort(key=lambda x: x['name'])
         self.progress_label = None
         self.waveform_canvas = None
         self.preview_container = None
@@ -91,6 +113,9 @@ class YouTubeDownloader:
             text_color=self.colors["accent"]
         )
         header.pack(pady=(0, 20))
+        
+        # Libreria YouTube (in alto)
+        self._create_library_section(main_frame)
         
         # Sezione Download
         download_frame = ctk.CTkFrame(main_frame, fg_color=self.colors["bg_card"], corner_radius=10)
@@ -154,6 +179,157 @@ class YouTubeDownloader:
         # Non pack ancora
         
         self._create_preview_section()
+    
+    def _create_library_section(self, parent):
+        """Crea sezione libreria YouTube"""
+        library_frame = ctk.CTkFrame(parent, fg_color=self.colors["bg_card"], corner_radius=10)
+        library_frame.pack(fill="x", pady=10)
+        
+        # Header con pulsanti
+        header_frame = ctk.CTkFrame(library_frame, fg_color="transparent")
+        header_frame.pack(fill="x", padx=15, pady=(15, 10))
+        
+        ctk.CTkLabel(
+            header_frame,
+            text="📚 Libreria YouTube",
+            font=ctk.CTkFont(size=16, weight="bold")
+        ).pack(side="left")
+        
+        # Pulsante cambia cartella
+        ctk.CTkButton(
+            header_frame,
+            text="📁 Cambia Cartella",
+            width=140,
+            height=30,
+            command=self._change_youtube_folder,
+            fg_color=self.colors["bg_secondary"],
+            hover_color=self.colors["bg_card"]
+        ).pack(side="right", padx=5)
+        
+        # Pulsante refresh
+        ctk.CTkButton(
+            header_frame,
+            text="🔄 Aggiorna",
+            width=100,
+            height=30,
+            command=self._refresh_library,
+            fg_color=self.colors["bg_secondary"],
+            hover_color=self.colors["bg_card"]
+        ).pack(side="right")
+        
+        # Info cartella
+        folder_label = ctk.CTkLabel(
+            library_frame,
+            text=f"📂 Cartella: {self.youtube_folder}",
+            font=ctk.CTkFont(size=10),
+            text_color=self.colors["text_muted"]
+        )
+        folder_label.pack(padx=15, pady=(0, 5), anchor="w")
+        self.library_folder_label = folder_label
+        
+        # Lista file
+        list_container = ctk.CTkScrollableFrame(library_frame, height=150, fg_color=self.colors["bg_primary"])
+        list_container.pack(fill="both", expand=True, padx=15, pady=(5, 15))
+        
+        self.library_list_frame = list_container
+        self._update_library_ui()
+    
+    def _update_library_ui(self):
+        """Aggiorna UI della libreria"""
+        # Pulisci lista
+        for widget in self.library_list_frame.winfo_children():
+            widget.destroy()
+        
+        if not self.youtube_library:
+            ctk.CTkLabel(
+                self.library_list_frame,
+                text="Nessun file scaricato",
+                text_color=self.colors["text_muted"]
+            ).pack(pady=20)
+            return
+        
+        # Mostra file
+        for item in self.youtube_library:
+            item_frame = ctk.CTkFrame(self.library_list_frame, fg_color=self.colors["bg_card"], corner_radius=5)
+            item_frame.pack(fill="x", pady=2, padx=5)
+            
+            # Info
+            info_frame = ctk.CTkFrame(item_frame, fg_color="transparent")
+            info_frame.pack(side="left", fill="x", expand=True, padx=10, pady=5)
+            
+            ctk.CTkLabel(
+                info_frame,
+                text=item['name'],
+                font=ctk.CTkFont(size=11),
+                anchor="w"
+            ).pack(anchor="w")
+            
+            size_mb = item['size'] / (1024 * 1024)
+            ctk.CTkLabel(
+                info_frame,
+                text=f"Dimensione: {size_mb:.2f} MB",
+                font=ctk.CTkFont(size=9),
+                text_color=self.colors["text_muted"],
+                anchor="w"
+            ).pack(anchor="w")
+            
+            # Pulsanti
+            btn_frame = ctk.CTkFrame(item_frame, fg_color="transparent")
+            btn_frame.pack(side="right", padx=5)
+            
+            ctk.CTkButton(
+                btn_frame,
+                text="▶️ Carica",
+                width=80,
+                height=25,
+                command=lambda p=item['path'], n=item['name']: self._load_from_library(p, n),
+                fg_color=self.colors["success"]
+            ).pack(side="left", padx=2)
+            
+            ctk.CTkButton(
+                btn_frame,
+                text="🗑️",
+                width=30,
+                height=25,
+                command=lambda p=item['path']: self._delete_from_library(p),
+                fg_color=self.colors["danger"]
+            ).pack(side="left", padx=2)
+    
+    def _change_youtube_folder(self):
+        """Cambia cartella YouTube"""
+        from tkinter import filedialog
+        new_folder = filedialog.askdirectory(title="Seleziona cartella YouTube")
+        if new_folder:
+            self.youtube_folder = new_folder
+            # Salva nel config
+            if hasattr(self.parent, 'save_config'):
+                config = self.parent.load_config_dict()
+                config['youtube_folder'] = new_folder
+                with open(self.parent.config_file, 'w', encoding='utf-8') as f:
+                    import json
+                    json.dump(config, f, indent=2, ensure_ascii=False)
+            self.library_folder_label.configure(text=f"📂 Cartella: {self.youtube_folder}")
+            self._refresh_library()
+    
+    def _refresh_library(self):
+        """Ricarica libreria"""
+        self._load_youtube_library()
+        self._update_library_ui()
+    
+    def _load_from_library(self, file_path, title):
+        """Carica file dalla libreria"""
+        self.after(100, lambda: self._load_media_file(file_path, title))
+    
+    def _delete_from_library(self, file_path):
+        """Elimina file dalla libreria"""
+        from tkinter import messagebox
+        if messagebox.askyesno("Conferma", f"Eliminare il file?\n\n{os.path.basename(file_path)}"):
+            try:
+                os.remove(file_path)
+                self._refresh_library()
+                messagebox.showinfo("✓ Eliminato", "File eliminato dalla libreria")
+            except Exception as e:
+                messagebox.showerror("Errore", f"Impossibile eliminare file:\n{e}")
     
     def _create_preview_section(self):
         """Crea sezione preview e taglio"""
@@ -378,6 +554,10 @@ class YouTubeDownloader:
         """Completamento download"""
         self.download_btn.configure(state="normal", text="✓ Download Completato")
         self.progress_label.configure(text=f"✓ {self.video_title}")
+        
+        # STOP playback precedente se attivo (importante!)
+        if hasattr(self.parent, 'media_player_playing') and self.parent.media_player_playing:
+            self.parent.stop_youtube()
         
         # Mostra preview
         self.preview_container.pack(fill="both", expand=True, pady=10)
@@ -705,7 +885,7 @@ class YouTubeDownloader:
             print(f"Errore stop playback: {e}")
     
     def _save_clip(self):
-        """Salva clip"""
+        """Salva clip nella cartella YouTube"""
         if self.audio_data is None:
             messagebox.showerror("Errore", "Nessun audio caricato")
             return
@@ -718,7 +898,8 @@ class YouTubeDownloader:
         if not filename.lower().endswith(('.mp3', '.wav')):
             filename += '.mp3'
         
-        output_path = os.path.join(self.clips_folder, filename)
+        # Salva nella cartella YouTube
+        output_path = os.path.join(self.youtube_folder, filename)
         
         start_sample = int(self.start_time * self.sample_rate)
         end_sample = int(self.end_time * self.sample_rate)
@@ -746,11 +927,15 @@ class YouTubeDownloader:
             duration = self.end_time - self.start_time
             messagebox.showinfo(
                 "✓ Clip Salvata",
-                f"File: {filename}\nDurata: {duration:.2f}s\n\nLa clip è stata aggiunta alla soundboard!"
+                f"File: {filename}\nDurata: {duration:.2f}s\nCartella: youtube_downloads/\n\nLa clip è disponibile nella Libreria YouTube!"
             )
             
-            if self.on_download_complete:
-                self.on_download_complete(output_path)
+            # Aggiorna libreria
+            self._refresh_library()
+            
+            # NON aggiungere alla soundboard, solo alla libreria YouTube
+            # if self.on_download_complete:
+            #     self.on_download_complete(output_path)
             
             # Reset
             self.preview_container.pack_forget()

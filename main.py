@@ -90,6 +90,11 @@ class AudioMixerApp(ctk.CTk):
         if not os.path.exists(self.clips_folder):
             os.makedirs(self.clips_folder)
         
+        # Cartella YouTube downloads
+        self.youtube_folder = saved_config.get('youtube_folder', os.path.join(self.base_dir, "youtube_downloads"))
+        if not os.path.exists(self.youtube_folder):
+            os.makedirs(self.youtube_folder)
+        
         print(f"📂 Caricamento configurazione all'avvio:")
         print(f"   Config file: {self.config_file}")
         print(f"   Primary device dal config: {output_device}")
@@ -180,7 +185,7 @@ class AudioMixerApp(ctk.CTk):
         self.is_recording = False
         
         # YouTube Downloader
-        self.youtube_downloader = YouTubeDownloader(self, self._add_downloaded_clip, COLORS, self.clips_folder)
+        self.youtube_downloader = YouTubeDownloader(self, self._add_downloaded_clip, COLORS, self.clips_folder, self.youtube_folder)
         
         # Configurazione griglia
         self.grid_columnconfigure(0, weight=0)
@@ -2355,8 +2360,10 @@ class AudioMixerApp(ctk.CTk):
             corner_radius=10,
             border_width=2,
             border_color=COLORS["accent"],
-            width=120
+            width=120,
+            height=450
         )
+        strip_frame.pack_propagate(False)  # Mantieni dimensioni fisse
         
         # Nome bus
         name_label = ctk.CTkLabel(
@@ -2367,10 +2374,19 @@ class AudioMixerApp(ctk.CTk):
         )
         name_label.pack(pady=(10, 5))
         
-        # Device label
+        # Device label - mostra device attuale
+        device_name = "No Device"
+        if bus.device_id is not None:
+            import sounddevice as sd
+            try:
+                device_info = sd.query_devices(bus.device_id)
+                device_name = device_info['name'][:18]
+            except:
+                device_name = f"Dev {bus.device_id}"
+        
         device_label = ctk.CTkLabel(
             strip_frame,
-            text="No Device",
+            text=device_name,
             font=ctk.CTkFont(size=8),
             text_color=COLORS["text_muted"],
             wraplength=100
@@ -2701,11 +2717,16 @@ class AudioMixerApp(ctk.CTk):
                 sr = target_sr
                 print(f" ✓")
             
-            # Salva dati CON SAMPLE RATE CORRETTO
+            # STOP playback precedente se attivo
+            if hasattr(self, 'media_player_playing') and self.media_player_playing:
+                self.stop_youtube()
+            
+            # RESET COMPLETO stato media player
             self.media_player_audio = audio_data
             self.media_player_sr = target_sr  # USA IL TARGET, NON IL SR ORIGINALE
             self.media_player_duration = len(audio_data)
             self.media_player_positions = {}  # Reset posizioni per tutti i bus
+            self._media_positions = {}  # Reset posizioni callback (CRITICO!)
             self.media_player_playing = False
             self._media_debug_printed = False  # Reset flag debug
             

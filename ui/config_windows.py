@@ -61,8 +61,18 @@ class MixerConfigWindow(ctk.CTkToplevel):
         )
         hw_label.pack(pady=(10, 5), anchor="w", padx=20)
         
-        for i in range(1, 4):
+        # Solo HW1 e HW2 configurabili (HW3 è riservato al Media Player)
+        for i in range(1, 3):
             self.create_input_config(scroll, f"HW{i}", f"Hardware {i}")
+        
+        # Info HW3
+        hw3_info = ctk.CTkLabel(
+            scroll,
+            text="🎵 HW3: Riservato al Media Player (non configurabile)",
+            font=ctk.CTkFont(size=11),
+            text_color=COLORS["text_muted"]
+        )
+        hw3_info.pack(pady=(5, 0), anchor="w", padx=20)
         
         # Virtual Inputs
         virt_label = ctk.CTkLabel(
