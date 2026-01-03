@@ -202,8 +202,42 @@ class MixerConfigWindow(ctk.CTkToplevel):
     def assign_input(self, channel_id, device_str):
         """Assegna device a input"""
         if device_str == "None":
-            print(f"⚠ Rimozione dispositivo da {channel_id}")
-            # TODO: Implementare rimozione device
+            print(f"⚠️ Rimozione dispositivo da {channel_id}")
+            
+            try:
+                # Ferma l'input stream se attivo
+                if channel_id in self.pro_mixer.input_streams:
+                    stream = self.pro_mixer.input_streams[channel_id]
+                    if stream:
+                        stream.stop()
+                        stream.close()
+                    del self.pro_mixer.input_streams[channel_id]
+                
+                # Rimuovi dalla mappa dispositivi
+                if channel_id in self.pro_mixer.input_device_map:
+                    del self.pro_mixer.input_device_map[channel_id]
+                
+                # Resetta nome canale
+                if channel_id in self.pro_mixer.channels:
+                    self.pro_mixer.channels[channel_id].name = channel_id
+                    
+                    # Aggiorna UI se esiste
+                    if hasattr(self.parent, 'mixer_channel_strips') and channel_id in self.parent.mixer_channel_strips:
+                        strip = self.parent.mixer_channel_strips[channel_id]
+                        if hasattr(strip, 'name_label'):
+                            strip.name_label.configure(text=channel_id)
+                
+                # Salva configurazione
+                self.parent.save_config()
+                print(f"   ✓ Dispositivo rimosso e configurazione salvata")
+                
+                messagebox.showinfo("✓ Rimosso", f"Dispositivo rimosso da {channel_id}")
+            except Exception as e:
+                print(f"❌ Errore rimozione: {e}")
+                import traceback
+                traceback.print_exc()
+                messagebox.showerror("Errore", f"Errore durante la rimozione: {str(e)}")
+            
             return
         
         try:
@@ -262,6 +296,48 @@ class MixerConfigWindow(ctk.CTkToplevel):
     def assign_output(self, bus_name, device_str):
         """Assegna device a bus"""
         if device_str == "None":
+            print(f"⚠️ Rimozione dispositivo da Bus {bus_name}")
+            
+            try:
+                # Ferma lo stream se attivo
+                if bus_name in self.pro_mixer.buses:
+                    bus = self.pro_mixer.buses[bus_name]
+                    if bus.stream:
+                        bus.stream.stop()
+                        bus.stream.close()
+                        bus.stream = None
+                    bus.device_id = None
+                    
+                    # Aggiorna UI se esiste
+                    if bus_name in self.bus_strips:
+                        self.bus_strips[bus_name].device_label.configure(text="Non configurato")
+                
+                # Sincronizzazione con soundboard se è A1 o A2
+                if bus_name == 'A1':
+                    self.parent.mixer.output_device = None
+                    config = self.parent.config_manager.load_config_dict()
+                    config['audio_output_device'] = None
+                    with open(self.parent.config_file, 'w', encoding='utf-8') as f:
+                        json.dump(config, f, indent=2, ensure_ascii=False)
+                    print(f"   ✓ Primary Output rimosso")
+                
+                elif bus_name == 'A2':
+                    self.parent.mixer.secondary_output_device = None
+                    config = self.parent.config_manager.load_config_dict()
+                    config['secondary_output_device'] = None
+                    with open(self.parent.config_file, 'w', encoding='utf-8') as f:
+                        json.dump(config, f, indent=2, ensure_ascii=False)
+                    print(f"   ✓ Secondary Output rimosso")
+                
+                # Salva configurazione ProMixer
+                self.parent.save_config()
+                print(f"   ✓ Dispositivo rimosso e configurazione salvata")
+                
+                messagebox.showinfo("✓ Rimosso", f"Dispositivo rimosso da Bus {bus_name}")
+            except Exception as e:
+                print(f"❌ Errore rimozione: {e}")
+                messagebox.showerror("Errore", f"Errore durante la rimozione: {str(e)}")
+            
             return
         
         try:
