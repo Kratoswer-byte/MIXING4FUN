@@ -523,8 +523,18 @@ class ProMixer:
             with self.lock:
                 bus = self.buses[bus_name]
                 
+                # ⚠️ RESAMPLING: Se il bus ha sample rate diverso dal ProMixer
+                # Calcola quanti frames servono al ProMixer per produrre la durata richiesta dal bus
+                if bus.sample_rate != self.sample_rate:
+                    # Durata richiesta dal bus (in secondi)
+                    duration = frames / bus.sample_rate
+                    # Frames necessari al sample rate del ProMixer
+                    promixer_frames = int(duration * self.sample_rate)
+                else:
+                    promixer_frames = frames
+                
                 # Mix di tutti i canali routati verso questo bus
-                mix = np.zeros((frames, 2), dtype=np.float32)
+                mix = np.zeros((promixer_frames, 2), dtype=np.float32)
                 active_channels = 0
                 
                 for ch_id, channel in self.channels.items():
@@ -569,11 +579,11 @@ class ProMixer:
                         # Priorità 2: Audio source (soundboard)
                         if audio is None and channel.audio_source:
                             # Passa il nome del bus come stream_id per posizioni indipendenti
-                            audio = channel.audio_source.get_audio(frames, stream_id=bus_name)
+                            audio = channel.audio_source.get_audio(promixer_frames, stream_id=bus_name)
                         
                         # Priorità 3: Fallback queue (legacy)
                         if audio is None:
-                            audio = channel.get_audio_from_queue(frames)
+                            audio = channel.get_audio_from_queue(promixer_frames)
                             
                     elif channel.audio_buffer is not None or not channel.audio_queue.empty():
                         # Canale hardware/virtual: usa buffer condiviso per multi-bus
@@ -599,11 +609,11 @@ class ProMixer:
                                 audio = np.vstack(audio_frames)
                                 
                                 # Taglia alla lunghezza esatta o pad se necessario
-                                if len(audio) >= frames:
-                                    audio = audio[:frames]
+                                if len(audio) >= promixer_frames:
+                                    audio = audio[:promixer_frames]
                                 else:
                                     # Pad con silenzio se non abbastanza samples
-                                    padding = np.zeros((frames - len(audio), 2), dtype=np.float32)
+                                    padding = np.zeros((promixer_frames - len(audio), 2), dtype=np.float32)
                                     audio = np.vstack([audio, padding])
                                 
                                 # Salva nel buffer condiviso
@@ -647,6 +657,32 @@ class ProMixer:
                 # Registrazione (cattura da bus A1 prima di inviare al device)
                 if bus_name == self.recording_bus and self.is_recording:
                     self.recorded_frames.append(mix.copy())
+                
+                # ⚠️ RESAMPLING: Se il bus ha sample rate diverso, resample l'output
+                if bus.sample_rate != self.sample_rate:
+                    try:
+                        # Usa resampy per resampling veloce e di qualità
+                        import resampy
+                        # Resample ogni canale
+                        resampled = np.zeros((frames, 2), dtype=np.float32)
+                        for ch in range(2):
+                            resampled[:, ch] = resampy.resample(
+                                mix[:, ch], 
+                                self.sample_rate, 
+                                bus.sample_rate,
+                                filter='kaiser_best'
+                            )[:frames]  # Taglia esattamente a frames richiesti
+                        mix = resampled
+                    except ImportError:
+                        # Fallback a scipy se resampy non disponibile
+                        from scipy.signal import resample
+                        mix = resample(mix, frames, axis=0).astype(np.float32)
+                    except Exception as e:
+                        # In caso di errore, usa silenzio
+                        if error_count[0] < 3:
+                            print(f"⚠️ [{bus_name}] Errore resampling: {e}")
+                            error_count[0] += 1
+                        mix = np.zeros((frames, 2), dtype=np.float32)
                 
                 # Verifica dimensioni finali
                 if mix.shape[0] != frames or mix.shape[1] != 2:
@@ -713,8 +749,14 @@ class ProMixer:
             print(f"✗ Errore avvio input {channel_id}: {e}")
             return False
     
-    def start_output(self, bus_name: str):
-        """Avvia output stream per un bus"""
+    def start_output(self, bus_name: str, custom_samplerate: int = None, custom_dtype: str = None):
+        """Avvia output stream per un bus
+        
+        Args:
+            bus_name: Nome del bus (A1, A2, etc.)
+            custom_samplerate: Sample rate personalizzato (opzionale, default: sample rate ProMixer)
+            custom_dtype: Tipo dati personalizzato ('float32', 'int16', 'int32', opzionale)
+        """
         bus = self.buses[bus_name]
         
         if bus.device_id is None:
@@ -734,38 +776,71 @@ class ProMixer:
             device_info = sd.query_devices(bus.device_id)
             channels = min(device_info['max_output_channels'], 2)
             
-            # USA SEMPRE il sample rate nativo del dispositivo
-            # Windows WASAPI non supporta sample rate diversi
+            # Sample rate: usa sempre quello del ProMixer per evitare resampling
+            target_samplerate = custom_samplerate if custom_samplerate else self.sample_rate
             device_samplerate = int(device_info.get('default_samplerate', 48000))
             
-            # FORZA il sample rate del ProMixer a coincidere col device
-            if device_samplerate != self.sample_rate:
-                print(f"⚠️ Device {bus.device_id} ha sample rate {device_samplerate}Hz")
-                print(f"   ProMixer forzato da {self.sample_rate}Hz a {device_samplerate}Hz")
-                self.sample_rate = device_samplerate
-                # Aggiorna tutti i canali e bus
-                for ch in self.channels.values():
-                    ch.sample_rate = device_samplerate
-                for b in self.buses.values():
-                    b.sample_rate = device_samplerate
+            # Dtype: usa custom se specificato, altrimenti float32
+            target_dtype = custom_dtype if custom_dtype else 'float32'
             
-            stream = sd.OutputStream(
-                samplerate=device_samplerate,  # 48kHz su Windows
-                blocksize=self.buffer_size,  # 1024 samples
-                device=bus.device_id,
-                channels=channels,
-                dtype='float32',  # Windows converte a int16 16-bit
-                callback=self.audio_output_callback(bus_name),
-                dither_off=True  # Disabilita dithering per audio più pulito
-            )
-            stream.start()
-            bus.stream = stream
-            bus.sample_rate = device_samplerate
-            
-            print(f"✓ Output avviato: {bus_name} -> Device {bus.device_id} ({device_info['name']}) @ {device_samplerate}Hz")
-            return True
+            # Prova ad aprire lo stream con il sample rate richiesto
+            try:
+                stream = sd.OutputStream(
+                    samplerate=target_samplerate,
+                    blocksize=self.buffer_size,
+                    device=bus.device_id,
+                    channels=channels,
+                    dtype=target_dtype,
+                    callback=self.audio_output_callback(bus_name),
+                    dither_off=True
+                )
+                stream.start()
+                bus.stream = stream
+                bus.sample_rate = target_samplerate
+                
+                if target_samplerate != device_samplerate:
+                    print(f"ℹ️ Bus {bus_name}: {target_samplerate}Hz (nativo device: {device_samplerate}Hz)")
+                
+                print(f"✓ Output avviato: {bus_name} -> Device {bus.device_id} ({device_info['name']}) @ {target_samplerate}Hz [{target_dtype}]")
+                return True
+                
+            except Exception as e_rate:
+                # Se il sample rate richiesto non è supportato, usa quello nativo del device
+                if "Invalid sample rate" in str(e_rate) or "PaErrorCode -9997" in str(e_rate):
+                    print(f"⚠️ Bus {bus_name}: {target_samplerate}Hz non supportato, uso {device_samplerate}Hz")
+                    
+                    # Se questo è il primo bus (A1), aggiorna il ProMixer
+                    if bus_name == 'A1':
+                        print(f"   📻 Aggiornamento ProMixer: {self.sample_rate}Hz → {device_samplerate}Hz")
+                        self.sample_rate = device_samplerate
+                        for ch in self.channels.values():
+                            ch.sample_rate = device_samplerate
+                        for b in self.buses.values():
+                            b.sample_rate = device_samplerate
+                    
+                    # Riprova con sample rate nativo
+                    stream = sd.OutputStream(
+                        samplerate=device_samplerate,
+                        blocksize=self.buffer_size,
+                        device=bus.device_id,
+                        channels=channels,
+                        dtype=target_dtype,
+                        callback=self.audio_output_callback(bus_name),
+                        dither_off=True
+                    )
+                    stream.start()
+                    bus.stream = stream
+                    bus.sample_rate = device_samplerate
+                    
+                    print(f"✓ Output avviato: {bus_name} -> Device {bus.device_id} ({device_info['name']}) @ {device_samplerate}Hz [{target_dtype}]")
+                    return True
+                else:
+                    raise e_rate
+                    
         except Exception as e:
             print(f"✗ Errore avvio output {bus_name}: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def start_all(self):

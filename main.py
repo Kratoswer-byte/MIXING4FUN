@@ -117,15 +117,9 @@ class AudioMixerApp(ctk.CTk):
         # ProMixer (mixer professionale multi-canale)
         print(f"🎛️ Inizializzazione ProMixer integrato...")
         
-        # Rileva sample rate del dispositivo primario
-        primary_sr = 48000  # Default
-        if output_device is not None:
-            try:
-                primary_dev_info = devices[output_device]
-                primary_sr = int(primary_dev_info.get('default_samplerate', 48000))
-                print(f"   Sample rate rilevato dal dispositivo primario: {primary_sr} Hz")
-            except:
-                print(f"   Uso sample rate default: {primary_sr} Hz")
+        # Carica sample rate dalla configurazione (GLOBALE per tutto il sistema)
+        primary_sr = saved_config.get('primary_samplerate', 48000)
+        print(f"   Sample rate configurato: {primary_sr}Hz (GLOBALE)")
         
         # Buffer 1024 per stabilità audio (riduce scricchiolii)
         # Latenza: ~21ms @ 48kHz (accettabile per streaming/Discord)
@@ -1098,6 +1092,44 @@ class AudioMixerApp(ctk.CTk):
         )
         self.primary_output_menu.grid(row=1, column=1, pady=10, padx=15, sticky="ew")
         
+        # Sample Rate A1
+        ctk.CTkLabel(
+            primary_frame,
+            text="Frequenza Campionamento:",
+            font=ctk.CTkFont(size=13)
+        ).grid(row=2, column=0, pady=10, padx=15, sticky="w")
+        
+        self.primary_samplerate_var = ctk.StringVar(value="48000 Hz")
+        self.primary_samplerate_menu = ctk.CTkOptionMenu(
+            primary_frame,
+            variable=self.primary_samplerate_var,
+            values=["16000 Hz", "44100 Hz", "48000 Hz", "96000 Hz", "192000 Hz"],
+            fg_color=COLORS["bg_secondary"],
+            button_color=COLORS["accent"],
+            button_hover_color=COLORS["accent_hover"],
+            width=200
+        )
+        self.primary_samplerate_menu.grid(row=2, column=1, pady=10, padx=15, sticky="w")
+        
+        # Bit Depth A1
+        ctk.CTkLabel(
+            primary_frame,
+            text="Profondità Bit:",
+            font=ctk.CTkFont(size=13)
+        ).grid(row=3, column=0, pady=(10, 15), padx=15, sticky="w")
+        
+        self.primary_bitdepth_var = ctk.StringVar(value="32-bit float")
+        self.primary_bitdepth_menu = ctk.CTkOptionMenu(
+            primary_frame,
+            variable=self.primary_bitdepth_var,
+            values=["16-bit", "24-bit", "32-bit float"],
+            fg_color=COLORS["bg_secondary"],
+            button_color=COLORS["accent"],
+            button_hover_color=COLORS["accent_hover"],
+            width=200
+        )
+        self.primary_bitdepth_menu.grid(row=3, column=1, pady=(10, 15), padx=15, sticky="w")
+        
         # ===== OUTPUT SECONDARIO =====
         secondary_frame = ctk.CTkFrame(main_container, fg_color=COLORS["bg_card"])
         secondary_frame.grid(row=1, column=0, pady=10, sticky="ew")
@@ -1130,6 +1162,44 @@ class AudioMixerApp(ctk.CTk):
         )
         self.secondary_output_menu.grid(row=1, column=1, pady=10, padx=15, sticky="ew")
         
+        # Sample Rate A2
+        ctk.CTkLabel(
+            secondary_frame,
+            text="Frequenza Campionamento:",
+            font=ctk.CTkFont(size=13)
+        ).grid(row=2, column=0, pady=10, padx=15, sticky="w")
+        
+        self.secondary_samplerate_var = ctk.StringVar(value="48000 Hz")
+        self.secondary_samplerate_menu = ctk.CTkOptionMenu(
+            secondary_frame,
+            variable=self.secondary_samplerate_var,
+            values=["16000 Hz", "44100 Hz", "48000 Hz", "96000 Hz", "192000 Hz"],
+            fg_color=COLORS["bg_secondary"],
+            button_color=COLORS["success"],
+            button_hover_color="#00b8d4",
+            width=200
+        )
+        self.secondary_samplerate_menu.grid(row=2, column=1, pady=10, padx=15, sticky="w")
+        
+        # Bit Depth A2
+        ctk.CTkLabel(
+            secondary_frame,
+            text="Profondità Bit:",
+            font=ctk.CTkFont(size=13)
+        ).grid(row=3, column=0, pady=10, padx=15, sticky="w")
+        
+        self.secondary_bitdepth_var = ctk.StringVar(value="32-bit float")
+        self.secondary_bitdepth_menu = ctk.CTkOptionMenu(
+            secondary_frame,
+            variable=self.secondary_bitdepth_var,
+            values=["16-bit", "24-bit", "32-bit float"],
+            fg_color=COLORS["bg_secondary"],
+            button_color=COLORS["success"],
+            button_hover_color="#00b8d4",
+            width=200
+        )
+        self.secondary_bitdepth_menu.grid(row=3, column=1, pady=10, padx=15, sticky="w")
+        
         # Checkbox "Abilita secondo output"
         self.enable_secondary_var = ctk.BooleanVar(value=False)
         self.enable_secondary_check = ctk.CTkCheckBox(
@@ -1139,7 +1209,7 @@ class AudioMixerApp(ctk.CTk):
             command=self.on_secondary_enabled_changed,
             font=ctk.CTkFont(size=13)
         )
-        self.enable_secondary_check.grid(row=2, column=0, columnspan=2, pady=(0, 15), padx=15, sticky="w")
+        self.enable_secondary_check.grid(row=4, column=0, columnspan=2, pady=(0, 15), padx=15, sticky="w")
         
         # Checkbox Avvio Automatico
         startup_frame = ctk.CTkFrame(main_container, fg_color=COLORS["bg_card"])
@@ -1375,12 +1445,26 @@ class AudioMixerApp(ctk.CTk):
             primary_device = config.get('audio_output_device', None)
             secondary_device = config.get('secondary_output_device', None)
             
+            # Carica sample rate e bit depth per ogni bus
+            primary_sr = config.get('primary_samplerate', 48000)
+            secondary_sr = config.get('secondary_samplerate', 48000)
+            primary_bd = config.get('primary_bitdepth', '32-bit float')
+            secondary_bd = config.get('secondary_bitdepth', '32-bit float')
+            
             # Imposta valori salvati
             if primary_device is not None:
                 for dev_id, dev_name in self.device_list:
                     if dev_id == primary_device:
                         self.primary_output_var.set(dev_name)
                         break
+            
+            # Imposta sample rate e bit depth salvati per A1
+            self.primary_samplerate_var.set(f"{primary_sr} Hz")
+            self.primary_bitdepth_var.set(primary_bd)
+            
+            # Imposta sample rate e bit depth salvati per A2
+            self.secondary_samplerate_var.set(f"{secondary_sr} Hz")
+            self.secondary_bitdepth_var.set(secondary_bd)
             
             if secondary_device is not None:
                 self.enable_secondary_var.set(True)
@@ -1773,13 +1857,32 @@ class AudioMixerApp(ctk.CTk):
                 print("⚠ Device secondario non valido, ignorato")
                 secondary_device = None
         
+        # Estrai sample rate e bit depth PER OGNI BUS
+        primary_sr = int(self.primary_samplerate_var.get().replace(" Hz", ""))
+        secondary_sr = int(self.secondary_samplerate_var.get().replace(" Hz", ""))
+        
+        # Mappa bit depth a numpy dtype
+        bitdepth_map = {
+            "16-bit": "int16",
+            "24-bit": "int32",  # 24-bit viene gestito come int32
+            "32-bit float": "float32"
+        }
+        primary_dtype = bitdepth_map[self.primary_bitdepth_var.get()]
+        secondary_dtype = bitdepth_map[self.secondary_bitdepth_var.get()]
+        
         try:
             # Salva configurazione
             config = self.load_config_dict()
             config['audio_output_device'] = primary_device
             config['secondary_output_device'] = secondary_device
+            config['primary_samplerate'] = primary_sr
+            config['secondary_samplerate'] = secondary_sr
+            config['primary_bitdepth'] = self.primary_bitdepth_var.get()
+            config['secondary_bitdepth'] = self.secondary_bitdepth_var.get()
             
             print(f"💾 Salvataggio configurazione:")
+            print(f"   Bus A1: {primary_sr}Hz [{primary_dtype}]")
+            print(f"   Bus A2: {secondary_sr}Hz [{secondary_dtype}]")
             print(f"   Primary device: {primary_device}")
             print(f"   Secondary device: {secondary_device}")
             print(f"   File: {self.config_file}")
@@ -1803,12 +1906,12 @@ class AudioMixerApp(ctk.CTk):
             bus_a1.device_id = primary_device
             print(f"   Bus A1 → Device {primary_device}")
             
-            # Se il mixer è attivo, riavvia lo stream A1
+            # Se il mixer è attivo, riavvia lo stream A1 con le nuove impostazioni
             if self.pro_mixer_running:
-                self.pro_mixer.start_output('A1')
-                print(f"   ✓ Stream Bus A1 riavviato")
+                self.pro_mixer.start_output('A1', custom_samplerate=primary_sr, custom_dtype=primary_dtype)
+                print(f"   ✓ Stream Bus A1 riavviato @ {primary_sr}Hz [{primary_dtype}]")
             
-            # Bus A2 - Secondary Output
+            # Bus A2 - Secondary Output (con configurazione indipendente)
             if secondary_device is not None:
                 bus_a2 = self.pro_mixer.buses['A2']
                 if bus_a2.stream:
@@ -1823,10 +1926,10 @@ class AudioMixerApp(ctk.CTk):
                 # Abilita routing SOUNDBOARD → A2
                 self.pro_mixer.set_channel_routing('SOUNDBOARD', 'A2', True)
                 
-                # Se il mixer è attivo, riavvia lo stream A2
+                # Se il mixer è attivo, riavvia lo stream A2 con le SUE impostazioni
                 if self.pro_mixer_running:
-                    self.pro_mixer.start_output('A2')
-                    print(f"   ✓ Stream Bus A2 riavviato")
+                    self.pro_mixer.start_output('A2', custom_samplerate=secondary_sr, custom_dtype=secondary_dtype)
+                    print(f"   ✓ Stream Bus A2 riavviato @ {secondary_sr}Hz [{secondary_dtype}]")
             else:
                 # Disabilita routing SOUNDBOARD → A2
                 self.pro_mixer.set_channel_routing('SOUNDBOARD', 'A2', False)
@@ -1834,32 +1937,76 @@ class AudioMixerApp(ctk.CTk):
             
             print(f"✓ Bus sincronizzati con ProMixer!")
             
+            # ⚠️ IMPORTANTE: Il ProMixer usa il sample rate di A1 (Primary)
+            # Se A1 fallisce a quel sample rate, il ProMixer viene aggiornato automaticamente
+            old_promixer_sr = self.pro_mixer.sample_rate
+            old_mixer_sr = self.mixer.sample_rate
+            
+            # Aggiorna ProMixer al sample rate di A1 (potrebbe essere cambiato durante start_output)
+            new_promixer_sr = self.pro_mixer.sample_rate  # Potrebbe essere cambiato in start_output
+            
+            if old_mixer_sr != new_promixer_sr:
+                print(f"📻 Aggiornamento Soundboard Mixer: {old_mixer_sr}Hz → {new_promixer_sr}Hz")
+                self.mixer.sample_rate = new_promixer_sr
+                
+                # RICARICA TUTTE LE CLIP con il nuovo sample rate
+                print(f"🔄 Ricaricamento clip con nuovo sample rate...")
+                clips_to_reload = list(self.mixer.clips.items())
+                for clip_name, clip in clips_to_reload:
+                    try:
+                        # Salva stato playback
+                        was_playing = clip.is_playing
+                        was_looping = clip.is_looping
+                        
+                        # Ricarica clip con nuovo sample rate
+                        new_clip = AudioClip(clip.file_path, clip.name, target_sample_rate=new_promixer_sr)
+                        new_clip.volume = clip.volume
+                        new_clip.hotkey = clip.hotkey
+                        new_clip.is_looping = was_looping
+                        
+                        # Sostituisci nel mixer
+                        self.mixer.clips[clip_name] = new_clip
+                        
+                        # Riavvia se stava suonando
+                        if was_playing:
+                            new_clip.play()
+                        
+                        print(f"   ✓ {clip_name}")
+                    except Exception as e:
+                        print(f"   ✗ Errore ricaricamento {clip_name}: {e}")
+                
+                print(f"✓ Sistema aggiornato: ProMixer @ {new_promixer_sr}Hz")
+            
             # Note: Il mixer soundboard ora NON usa più output_device direttamente,
             # ma invia tutto tramite virtual_output_callback al ProMixer
             
             # Messaggio conferma con info sample rate
             devices = sd.query_devices()
             dev1 = devices[primary_device]
-            sr1_native = int(dev1.get('default_samplerate', 48000))
+            
+            # Ottieni i sample rate EFFETTIVI dei bus (potrebbero essere cambiati)
+            bus_a1_sr = self.pro_mixer.buses['A1'].sample_rate
+            bus_a2_sr = self.pro_mixer.buses['A2'].sample_rate if secondary_device else None
             
             msg = f"✓ Bus A1 (Primary Output):\n{dev1['name']}\n"
-            msg += f"Sample Rate Nativo: {sr1_native} Hz"
+            msg += f"Richiesto: {primary_sr} Hz [{self.primary_bitdepth_var.get()}]\n"
+            msg += f"Effettivo: {bus_a1_sr} Hz"
             
             warnings = []
             if secondary_device is not None:
                 dev2 = devices[secondary_device]
-                sr2_native = int(dev2.get('default_samplerate', 48000))
                 msg += f"\n\n✓ Bus A2 (Secondary Output):\n{dev2['name']}\n"
-                msg += f"Sample Rate Nativo: {sr2_native} Hz"
+                msg += f"Richiesto: {secondary_sr} Hz [{self.secondary_bitdepth_var.get()}]\n"
+                msg += f"Effettivo: {bus_a2_sr} Hz"
                 
-                # Verifica sample rate matching
-                if sr1_native != sr2_native:
-                    warnings.append(f"ℹ️ I bus hanno sample rate diversi:")
-                    warnings.append(f"   A1={sr1_native}Hz, A2={sr2_native}Hz")
-                    warnings.append(f"Ogni bus userà il proprio sample rate nativo.")
-                    warnings.append(f"Questo è NORMALE e supportato.")
+                # Avviso se i sample rate effettivi sono diversi
+                if bus_a1_sr != bus_a2_sr:
+                    warnings.append(f"⚠️ I bus usano sample rate diversi:")
+                    warnings.append(f"   A1 @ {bus_a1_sr}Hz, A2 @ {bus_a2_sr}Hz")
+                    warnings.append(f"Potrebbero esserci problemi di sincronizzazione audio!")
+                    warnings.append(f"Consiglio: configura entrambi i dispositivi in Windows allo stesso sample rate.")
             
-            msg += "\n\n🎛️ I bus del mixer sono stati sincronizzati!"
+            msg += f"\n\n🎛️ I bus del mixer sono stati sincronizzati!"
             msg += f"\n🎚️ ProMixer processing: {self.pro_mixer.sample_rate} Hz"
             
             if warnings:
@@ -1871,6 +2018,7 @@ class AudioMixerApp(ctk.CTk):
                 msg += "\n\n💡 Avvia il mixer dal tab 🎛️ Mixer per usare i nuovi dispositivi."
             
             messagebox.showinfo("Configurazione Applicata", msg)
+            
             
         except Exception as e:
             messagebox.showerror("Errore", f"Impossibile applicare configurazione:\n{str(e)}")
@@ -3808,6 +3956,22 @@ class AudioMixerApp(ctk.CTk):
                     proc.eq_low = effects.get('eq_low', 0.0)
                     proc.eq_mid = effects.get('eq_mid', 0.0)
                     proc.eq_high = effects.get('eq_high', 0.0)
+            
+            # ⚠️ IMPORTANTE: Assicurati che SOUNDBOARD sia sempre routato su A1 e A2 (se configurato)
+            # Questo previene che configurazioni salvate disabilitino accidentalmente il routing
+            config = self.load_config_dict()
+            primary_device = config.get('audio_output_device', None)
+            secondary_device = config.get('secondary_output_device', None)
+            
+            # Forza routing SOUNDBOARD → A1 (sempre attivo)
+            if primary_device is not None:
+                self.pro_mixer.set_channel_routing('SOUNDBOARD', 'A1', True)
+                print("   ✓ SOUNDBOARD → A1 forzato attivo")
+            
+            # Forza routing SOUNDBOARD → A2 (se A2 è configurato)
+            if secondary_device is not None:
+                self.pro_mixer.set_channel_routing('SOUNDBOARD', 'A2', True)
+                print("   ✓ SOUNDBOARD → A2 forzato attivo")
             
             print("✓ Configurazione ProMixer ripristinata")
             
